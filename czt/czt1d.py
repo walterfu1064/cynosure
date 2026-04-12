@@ -1,3 +1,19 @@
+"""
+PyTorch module for using the Chirp Z Transform to calculate the Fourier transform of
+an input signal at select frequencies that do not necessarily match the FFT grid.
+
+Useful for calculating, e.g., just the spectral components in a particular, narrow, band.
+
+The CZT radices and other factors are precomputed for the specific output frequency
+range defined on module init.
+
+Accepts multidimensional tensors, in which case the CZT is performed along the last dimension.
+
+Key public methods:
+- forward(): aliased by `__call__`, returns the CZT of the input tensor along its last dimension
+- freq: accesses the resampled frequencies corresponding to the CZT output
+"""
+
 import torch
 import torch.nn as nn
 
@@ -27,7 +43,7 @@ class ChirpZTransform1D(nn.Module):
         self.register_buffer("input_grid", torch.arange(self.num_input_points, dtype=self.ftype))
         self.register_buffer("output_grid", torch.arange(self.num_output_points, dtype=self.ftype))
         self.df = self._get_frequency_step()
-        self.freq = self._get_resampled_frequencies()
+        self.register_buffer("freq", self._get_resampled_frequencies())
 
         A, W = self._get_czt_radices()
         self.conv_length = self._get_conv_length()
@@ -48,7 +64,7 @@ class ChirpZTransform1D(nn.Module):
         Returns the complex numbers A and W that define the CZT's trajectory in the complex plane.
 
         A0 and W0 are hard-coded to 1 for the intended use case of pure frequency resampling.
-        Could be exposed to allow gain/loss, but I'm not sure why you'd want that here.
+        Could be exposed to allow gain/loss, but I'm not sure why you'd want that.
         """
         A0 = torch.ones(1, dtype=self.ctype)
         theta0 = torch.tensor(self.start_frequency * self.dx, dtype=self.ctype)
@@ -66,17 +82,16 @@ class ChirpZTransform1D(nn.Module):
         and then further to the next smallest power of 2.
         """
         L = 1
-        while L < self.num_input_points + self.num_output_points + 1:
+        while L < self.num_input_points + self.num_output_points - 1:
             L *= 2
         return L
 
     def _precompute_premultiplier(self, A: torch.Tensor, W: torch.Tensor) -> torch.Tensor:
         """
-        Returns the `A^{-n} * W^{-n^2/2}` factor that pre-multipliers the input signal.
-        Accumulates in log space before exponentiating for precision.
+        Returns the `A^{-n} * W^{n^2/2}` factor that pre-multipliers the input signal.
+        If we ever allow A0, W0 != 1, should compute in log-space to avoid over/underflow.
         """
-        log_premult = -self.input_grid * torch.log(A) + 0.5*torch.pow(self.input_grid, 2) * torch.log(W)
-        return log_premult.exp()
+        return torch.pow(A, -self.input_grid) * torch.pow(W, 0.5*self.input_grid**2)
 
     def _precompute_chirp_kernel(self, W: torch.Tensor) -> torch.Tensor:
         """
@@ -84,8 +99,7 @@ class ChirpZTransform1D(nn.Module):
         Rearranges it into FFT order, pads it up to a power of 2, and returns the FFT.
         """
         m = torch.arange(-(self.num_input_points - 1), self.num_output_points, dtype=self.ftype)
-        log_chirp = -0.5*torch.pow(m, 2) * torch.log(W)
-        chirp = log_chirp.exp()
+        chirp = torch.pow(W, -0.5*m**2)
 
         vn = torch.zeros(self.conv_length, dtype=self.ctype)
         vn[:self.num_output_points] = chirp[self.num_input_points-1:]
@@ -95,17 +109,16 @@ class ChirpZTransform1D(nn.Module):
 
     def _precompute_postmultiplier(self, W: torch.Tensor) -> torch.Tensor:
         """
-        Returns the `W^{-m^2/2}` factor that post-multiplies the convolution output.
-        Accumulates in log space before exponentiating for precision.
+        Returns the `W^{m^2/2}` factor that post-multiplies the convolution output.
+        If we ever allow A0, W0 != 1, should compute in log-space to avoid over/underflow.
         """
-        log_postmult = 0.5*self.output_grid * torch.log(W)
-        return log_postmult.exp()
+        return torch.pow(W, 0.5*self.output_grid**2)
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
+        """Returns the CZT of the input signal along its last dimension"""
         assert x.shape[-1] == self.num_input_points, f"Input shape {x.shape} does not match num_input_points {self.num_input_points}"
-
-        a = torch.zeros(self.conv_length, dtype=self.ctype, device=x.device)
-        a[:self.num_input_points] = x * self.premultiplier
-        conv = torch.fft.ifft(torch.fft.fft(a) * self.chirp_kernel)
-        czt = conv[:self.num_output_points] * self.postmultiplier
+        a = x * self.premultiplier
+        A_fft = torch.fft.fft(a, n=self.conv_length, dim=-1)
+        conv = torch.fft.ifft(A_fft * self.chirp_kernel, dim=-1)
+        czt = conv[..., :self.num_output_points] * self.postmultiplier
         return czt
