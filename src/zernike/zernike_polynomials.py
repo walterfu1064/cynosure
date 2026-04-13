@@ -47,7 +47,7 @@ def get_angular_term(phi: torch.Tensor, m: int) -> torch.Tensor:
     if m > 0:
         return torch.cos(m*phi)
     elif m < 0:
-        return torch.sin(m*phi)
+        return torch.sin(abs(m)*phi)
     else:
         return torch.ones_like(phi)
 
@@ -87,13 +87,16 @@ def get_noll_index(n: int, m: int) -> int:
         the Optical Society of America 66.3 pp. 207-211 (1976).
         ```
     """
-    base = n * (n+1) // 2 + abs(m)
+    base = n * (n + 1) // 2 + abs(m)
     if m == 0:
         return base + 1
-    if m > 0 and n % 4 < 2:
-        return base
-    if m < 0 and n % 4 >= 2:
-        return base
-    if m >= 0 and n % 4 >= 2:
-        return base
-    return base + 1
+    elif m > 0:
+        if n % 4 < 2:
+            return base
+        else:
+            return base + 1
+    else:
+        if n % 4 < 2:
+            return base + 1
+        else:
+            return base
