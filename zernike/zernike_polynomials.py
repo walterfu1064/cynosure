@@ -1,6 +1,6 @@
 import math
 
-import numpy as np
+import torch
 
 
 def get_radial_series(n: int, m: int) -> tuple[list, list]:
@@ -27,34 +27,34 @@ def get_radial_series(n: int, m: int) -> tuple[list, list]:
     return coefs, powers
 
 
-def get_radial_term(r: np.ndarray, n: int, m: int) -> np.ndarray:
+def get_radial_term(r: torch.Tensor, n: int, m: int) -> torch.Tensor:
     """
     Returns the radial part of the (n, m) Zernike polynomial as a 2D array.
     """
     coefs, powers = get_radial_series(n, m)
-    coefs = np.asarray(coefs)
-    powers = np.asarray(powers)
-    return (coefs * np.power(r[..., None], powers)).sum(-1)
+    coefs = torch.as_tensor(coefs)
+    powers = torch.as_tensor(powers)
+    return (coefs * torch.pow(r[..., None], powers)).sum(-1)
 
 
-def get_angular_term(theta: np.ndarray, m: int) -> np.ndarray:
+def get_angular_term(theta: torch.Tensor, m: int) -> torch.Tensor:
     """
     Returns the angular part of the (n, m) Zernike polynomial as a 2D array.
     """
     if m > 0:
-        return np.cos(theta)
+        return torch.cos(theta)
     elif m < 0:
-        return np.sin(theta)
+        return torch.sin(theta)
     else:
-        return np.ones_like(theta)
+        return torch.ones_like(theta)
 
 
 def generate_zernike_polynomial(
-        r: np.ndarray,
-        theta: np.ndarray,
+        r: torch.Tensor,
+        theta: torch.Tensor,
         n: int,
         m: int
-) -> np.ndarray:
+) -> torch.Tensor:
     """
     Returns the (n, m) Zernike polynomial evaluated over the 2D grids r and theta.
     Note that the result uses analytic continuation over the full domain of r and theta,
