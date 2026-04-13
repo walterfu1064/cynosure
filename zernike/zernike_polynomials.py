@@ -7,6 +7,9 @@ def get_radial_series(n: int, m: int) -> tuple[list, list]:
     """
     Returns a list of coefficients and corresponding powers for the radial
     part of the Zernike polynomial of the given order.
+
+    Note that past n ~ 12 or so, this method will lose precision, and should
+    be replaced with a recurrence relation.
     """
     m = abs(m)
     assert n >= m, f"Invalid Zernike order: {n = }, {m = }"
@@ -32,41 +35,46 @@ def get_radial_term(r: torch.Tensor, n: int, m: int) -> torch.Tensor:
     Returns the radial part of the (n, m) Zernike polynomial as a 2D array.
     """
     coefs, powers = get_radial_series(n, m)
-    coefs = torch.as_tensor(coefs)
-    powers = torch.as_tensor(powers)
+    coefs = torch.as_tensor(coefs).to(r.dtype)
+    powers = torch.as_tensor(powers).to(r.dtype)
     return (coefs * torch.pow(r[..., None], powers)).sum(-1)
 
 
-def get_angular_term(theta: torch.Tensor, m: int) -> torch.Tensor:
+def get_angular_term(phi: torch.Tensor, m: int) -> torch.Tensor:
     """
     Returns the angular part of the (n, m) Zernike polynomial as a 2D array.
     """
     if m > 0:
-        return torch.cos(theta)
+        return torch.cos(m*phi)
     elif m < 0:
-        return torch.sin(theta)
+        return torch.sin(m*phi)
     else:
-        return torch.ones_like(theta)
+        return torch.ones_like(phi)
 
 
 def generate_zernike_polynomial(
         r: torch.Tensor,
-        theta: torch.Tensor,
+        phi: torch.Tensor,
         n: int,
         m: int,
-        mask_to_unit_disk: bool = True
+        mask_to_unit_disk: bool
 ) -> torch.Tensor:
     """
-    Returns the (n, m) Zernike polynomial evaluated over the 2D grids r and theta.
+    Returns the (n, m) Zernike polynomial evaluated over the 2D grids r and phi.
+    Polynomials are normalized to be orthonormal.
 
     If `mask_to_unit_disk` is True, results will be zeroed for all r > 1.
-    If False, polynomials will be analytically continued over the full domain fo r and theta.
+    If False, polynomials will be analytically continued over the full domain for and phi.
     """
     rho = get_radial_term(r, n, m)
-    gamma = get_angular_term(theta, m)
+    gamma = get_angular_term(phi, m)
+
+    norm = math.sqrt(n+1) if m == 0 else math.sqrt(2*n+2)
+    z = norm * rho * gamma
+
     if mask_to_unit_disk:
-        rho *= (r <= 1)
-    return rho * gamma
+        z *= (r <= 1)
+    return z
 
 
 def get_noll_index(n: int, m: int) -> int:
@@ -79,12 +87,13 @@ def get_noll_index(n: int, m: int) -> int:
         the Optical Society of America 66.3 pp. 207-211 (1976).
         ```
     """
+    base = n * (n+1) // 2 + abs(m)
+    if m == 0:
+        return base + 1
     if m > 0 and n % 4 < 2:
-        mod_term = 0
-    elif m < 0 and n % 4 >= 2:
-        mod_term = 0
-    elif m >= 0 and n % 4 >= 2:
-        mod_term = 1
-    else:
-        mod_term = 1
-    return n*(n + 1)//2 + abs(m) + mod_term
+        return base
+    if m < 0 and n % 4 >= 2:
+        return base
+    if m >= 0 and n % 4 >= 2:
+        return base
+    return base + 1

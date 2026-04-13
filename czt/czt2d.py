@@ -15,16 +15,28 @@ from czt.czt1d import ChirpZTransform1D
 class ChirpZTransform2D(nn.Module):
     def __init__(
             self,
-            num_input_points: tuple[int, int],
-            num_output_points: tuple[int, int],
-            input_step: tuple[float, float],
-            start_frequency: tuple[float, float],
-            end_frequency: tuple[float, float],
+            num_input_points: int | tuple[int, int],
+            num_output_points: int | tuple[int, int],
+            input_step: float | tuple[float, float],
+            start_frequency: float | tuple[float, float],
+            end_frequency: float | tuple[float, float],
             *,
             ftype: torch.dtype = torch.float64,
             ctype: torch.dtype = torch.complex128
     ):
         super().__init__()
+
+        # If single params are given, duplicate across both dimensions
+        if not isinstance(num_input_points, (tuple, list)):
+            num_input_points = (num_input_points, num_input_points)
+        if not isinstance(num_output_points, (tuple, list)):
+            num_output_points = (num_output_points, num_output_points)
+        if not isinstance(input_step, (tuple, list)):
+            input_step = (input_step, input_step)
+        if not isinstance(start_frequency, (tuple, list)):
+            start_frequency = (start_frequency, start_frequency)
+        if not isinstance(end_frequency, (tuple, list)):
+            end_frequency = (end_frequency, end_frequency)
 
         self.czt_last = ChirpZTransform1D(
             num_input_points=num_input_points[1],
