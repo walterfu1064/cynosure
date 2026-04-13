@@ -9,6 +9,13 @@ range defined on module init.
 
 Accepts multidimensional tensors, in which case the CZT is performed along the last dimension.
 
+Follows the algorithm set out in:
+        ```
+        Rabiner, Schafer, and Rader, "The Chirp z-Transform Algorithm,"
+        IEEE Transactions on Audio and Electroacoustics 17.2 pp. 86-92 (1969).
+        https://ieeexplore.ieee.org/abstract/document/1162034
+        ```
+
 Key public methods:
 - forward(): aliased by `__call__`, returns the CZT of the input tensor along its last dimension
 - freq: accesses the resampled frequencies corresponding to the CZT output
