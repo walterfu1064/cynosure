@@ -25,14 +25,14 @@ and draws heavy inspiration from:
     https://opg.optica.org/oe/fulltext.cfm?uri=oe-31-6-9526
     ```
 
-The use of Debye-Wolf includes the following approximations:
+The use of Debye-Wolf implies the following approximations:
 - light is monochromatic
 - evanescent waves are negligible
 - the pupil and the propagation distance are both much larger than the wavelength (so Kirchhoff boundaries apply near the pupil)
 """
 
 
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from typing import NamedTuple
 
 import torch
@@ -44,6 +44,7 @@ from zernike import generate_zernike_polynomial, get_noll_index
 
 @dataclass
 class SimulationConfig:
+    """Parameters relating to the physical situation is digitized"""
     pupil_grid_size: int
     object_grid_size: int
     object_pixel_size: float
@@ -51,12 +52,24 @@ class SimulationConfig:
 
 @dataclass
 class OpticalConfig:
+    """Parameters related to the physical imaging system"""
     wavelength: float
     focal_length: float
     numerical_aperture: float
 
 
+@dataclass
+class ZernikeConfig:
+    """
+    Defines a max N for a Zernike bank.
+    Optionally only includes specific (n, m) elements.
+    """
+    max_n: int
+    allowed_nm: list[tuple[int, int]] = field(default_factory=list)
+
+
 class GridCollection(NamedTuple):
+    """Convenience to bundle rectilinear and polar coordinate grids"""
     x: torch.Tensor
     y: torch.Tensor
     r: torch.Tensor
@@ -68,7 +81,7 @@ class BeamPropagator(nn.Module):
             self,
             sim_cfg: SimulationConfig,
             optics_cfg: OpticalConfig,
-            max_zernike_n: int,
+            zernike_cfg: ZernikeConfig,
             *,
             ftype: torch.dtype = torch.float64,
             ctype: torch.dtype = torch.complex128,
@@ -90,7 +103,7 @@ class BeamPropagator(nn.Module):
         self._setup_pupil_coordinates()
         self._setup_object_coordinates()
         self._setup_polarization_factors()
-        self._setup_zernike_basis(max_zernike_n)
+        self._setup_zernike_basis(zernike_cfg)
 
         start_frequency, stop_frequency = self._calculate_object_frequencies()
         self.czt = ChirpZTransform2D(
@@ -180,17 +193,23 @@ class BeamPropagator(nn.Module):
         M = M * self.pupil_mask.to(M.dtype)  # reassert pupil mask
         self.register_buffer("polarization_rot", M)
 
-    def _setup_zernike_basis(self, max_zernike_n: int) -> None:
+    def _setup_zernike_basis(self, zernike_cfg: ZernikeConfig) -> None:
         """
-        Builds a [num_zernikes, H, W] tensor of precalculated Zernike polynomails in the pupil plane.
+        Builds a [num_zernikes, H, W] tensor of precalculated Zernike polynomials in the pupil plane.
         Also constructs an array of the corresponding Zernike indices. Both this and the Zernike
         bank are ordered by increasing Noll index.
         """
+
+        max_n = zernike_cfg.max_n
+        allowed_nm = set([tuple(nm) for nm in zernike_cfg.allowed_nm])
+
         zernike_list = []
-        for n in range(max_zernike_n+1):
+        for n in range(max_n+1):
             for m in range(-n, n+1, 2):
                 j = get_noll_index(n, m)
                 z = generate_zernike_polynomial(self.pupil_r_norm, self.pupil_phi, n, m, mask_to_unit_disk=True)
+                if allowed_nm and not (n, m) in allowed_nm:
+                    continue
                 zernike_list.append((j, n, m, z))
         zernike_list = sorted(zernike_list, key=lambda x: x[0])  # sort by Noll index
 
@@ -209,9 +228,22 @@ class BeamPropagator(nn.Module):
         max_frequency = self.object_radius / (self.wavelength * self.focal_length)
         return -max_frequency, max_frequency
 
-    def _make_aperture_field(self, aberrations: torch.Tensor):
-        """Construcst a complex field that fills the aperture and has the given aberration coefficients."""
-        pass
+    def _aberrate_aperture_field(self, aberrations: torch.Tensor) -> torch.Tensor:
+        """
+        Constructs a complex field that fills the aperture and has the given aberration coefficients.
+        Argument `aberrations` should be a [B, N] batched tensor, where N matches the Zernike bank.
+        Returns a [B, pupil_grid, pupil_grid] batch of fields.
+
+        Batch dimension might be literally a batch, or might be multiple propagation distances.
+
+        Currently starts with a field that fills the pupil uniformly, but might introduce
+        vignetting or an amplitude Zernike decomposition later.
+        """
+        B, N = aberrations.shape
+        phase = (aberrations.view(B, N, 1, 1) * self.zernike_bank.unsqueeze(0)).sum(1)  # [B, pupil_grid, pupil_grid]
+        E0 = self.pupil_mask.to(self.ctype).unsqueeze(0)  # [1, pupil_grid, pupil_grid]
+        E0 = E0 * torch.exp(2j*torch.pi*phase)
+        return E0
 
     def _propagate(self, aperture_field: torch.Tensor, z: torch.Tensor):
         """Propagates the given field to the given z position(s)"""
