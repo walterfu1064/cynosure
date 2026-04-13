@@ -1,1 +1,1 @@
-from zernike.zernike_polynomials import generate_zernike_polynomial, get_noll_index
+from .zernike_polynomials import generate_zernike_polynomial, get_noll_index
