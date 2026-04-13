@@ -53,15 +53,19 @@ def generate_zernike_polynomial(
         r: torch.Tensor,
         theta: torch.Tensor,
         n: int,
-        m: int
+        m: int,
+        mask_to_unit_disk: bool = True
 ) -> torch.Tensor:
     """
     Returns the (n, m) Zernike polynomial evaluated over the 2D grids r and theta.
-    Note that the result uses analytic continuation over the full domain of r and theta,
-    and should be masked by the unit disk downstream.
+
+    If `mask_to_unit_disk` is True, results will be zeroed for all r > 1.
+    If False, polynomials will be analytically continued over the full domain fo r and theta.
     """
     rho = get_radial_term(r, n, m)
     gamma = get_angular_term(theta, m)
+    if mask_to_unit_disk:
+        rho *= (r <= 1)
     return rho * gamma
 
 
