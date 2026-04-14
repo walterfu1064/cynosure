@@ -132,3 +132,18 @@ class TestOrthonormality:
                 z = generate_zernike_polynomial(R, PHI, n, m, mask_to_unit_disk=False)
                 norm_sq = (z * z * W).sum().item() / math.pi
                 assert abs(norm_sq - 1.0) < 1e-4, f"Z(n={n}, m={m}) norm^2 = {norm_sq}"
+
+    def test_orthogonal(self):
+        R, PHI, W = self.polar_grid()
+        count = 0
+        for n1 in range(5):
+            for m1 in range(-n1, n1 + 1, 2):
+                z1 = generate_zernike_polynomial(R, PHI, n1, m1, mask_to_unit_disk=True)
+                for n2 in range(n1, 5):
+                    for m2 in range(-n2, n2 + 1, 2):
+                        if n1 == n2 and m1 == m2:
+                            continue
+                        z2 = generate_zernike_polynomial(R, PHI, n2, m2, mask_to_unit_disk=True)
+                        norm_sq = (z1 * z2 * W).sum().item() / math.pi
+                        count += 1
+                        assert abs(norm_sq) < 1e-4, f"Z(n={n1}, m={m1}) x Z(n={n2}, m={m2}) = {norm_sq}"
