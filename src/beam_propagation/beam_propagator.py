@@ -191,6 +191,7 @@ class BeamPropagator(nn.Module):
 
         M = M * torch.sqrt(cos_theta)  # aplanatic apodization for energy conservation
         M = M * self.pupil_mask.to(M.dtype)  # reassert pupil mask
+        self.register_buffer("cos_theta", cos_theta)
         self.register_buffer("polarization_rot", M)
 
     def _setup_zernike_basis(self, zernike_cfg: ZernikeConfig) -> None:
@@ -228,27 +229,54 @@ class BeamPropagator(nn.Module):
         max_frequency = self.object_radius / (self.wavelength * self.focal_length)
         return -max_frequency, max_frequency
 
-    def _aberrate_aperture_field(self, aberrations: torch.Tensor) -> torch.Tensor:
+    def _construct_aperture_field(self) -> torch.Tensor:
         """
-        Constructs a complex field that fills the aperture and has the given aberration coefficients.
-        Argument `aberrations` should be a [B, N] batched tensor, where N matches the Zernike bank.
-        Returns a [B, pupil_grid, pupil_grid] batch of fields.
-
-        Batch dimension might be literally a batch, or might be multiple propagation distances.
+        Constructs a complex field that fills the aperture.
 
         Currently starts with a field that fills the pupil uniformly, but might introduce
         vignetting or an amplitude Zernike decomposition later.
         """
+        field = self.pupil_mask.to(self.ctype)  # [pupil_grid, pupil_grid]
+        return field
+
+    def _aberrate_aperture_field(self, field: torch.Tensor, aberrations: torch.Tensor) -> torch.Tensor:
+        """
+        Aberrates the given (scalar) field.
+        Argument `aberrations` should be a [B, N] batched tensor, where N matches the Zernike bank.
+        Returns a [B, pupil_grid, pupil_grid] batch of fields.
+
+        Batch dimension might be literally a batch, or might be multiple propagation distances.
+        """
         B, N = aberrations.shape
         phase = (aberrations.view(B, N, 1, 1) * self.zernike_bank.unsqueeze(0)).sum(1)  # [B, pupil_grid, pupil_grid]
-        E0 = self.pupil_mask.to(self.ctype).unsqueeze(0)  # [1, pupil_grid, pupil_grid]
-        E0 = E0 * torch.exp(2j*torch.pi*phase)
-        return E0
+        ab_field = field.unsqueeze(0) * torch.exp(2j*torch.pi*phase)
+        return ab_field
 
-    def _propagate(self, aperture_field: torch.Tensor, z: torch.Tensor):
-        """Propagates the given field to the given z position(s)"""
-        pass
+    def _propagate(self, field: torch.Tensor, z: torch.Tensor) -> torch.Tensor:
+        """
+        Propagates the given (scalar) field to the given z positions.
+        Takes `field` as [B, pupil_grid, pupil_grid], and `z` as [B,].
+        `z` is measured from the focal plane.
+        Returns a [B, output_pol, input_pol, object_grid, object_grid] batch of fields,
+        separated by the 3 output polarizations for each of the 2 input polarizations.
+        """
+        B = field.shape[0]
+        prop_phase = self.k0 * (z.view(B, 1, 1) + self.focal_length) * self.cos_theta  # [B, H, W]
+        prop_field = field * torch.exp(1j * prop_phase)
+        prop_field = prop_field.view(B, 1, 1, self.pupil_grid_size, self.pupil_grid_size)
+        prop_field = prop_field * self.polarization_rot.unsqueeze(0)  # [B, 3, 2, H, W]
+        prop_field = self.czt(prop_field.flatten(0, 2)).view(B, 3, 2, self.object_grid_size, self.object_grid_size)
+        return prop_field
 
-    def forward(self, aberrations: torch.Tensor):
-        pass
-
+    def forward(self, aberrations: torch.Tensor, z: torch.Tensor) -> torch.Tensor:
+        """
+        Given a batch of aberrations [B, N] and a batch of propagation distances [B,],
+        constructs an aperture field with the given aberrations and propagates it forwards.
+        `z` is measured from the focal plane.
+        Returns the total intensities at the propagation distances.
+        """
+        field = self._construct_aperture_field()  # [pupil_grid, pupil_grid]
+        ab_field = self._aberrate_aperture_field(field, aberrations)  # [B, pupil_grid, pupil_grid]
+        prop_field = self._propagate(ab_field, z)  # [B, output_pol, input_pol, pupil_grid, pupil_grid]
+        intensity = torch.abs(prop_field)**2
+        return intensity.sum((1, 2)) / 2  # incoherent polarization sum, returns [B, object_grid, object_grid]
