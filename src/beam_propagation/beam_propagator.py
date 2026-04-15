@@ -189,7 +189,8 @@ class BeamPropagator(nn.Module):
         M[2, 0] = -sin_theta * cos_phi
         M[2, 1] = -sin_theta * sin_phi
 
-        M = M * torch.sqrt(cos_theta)  # aplanatic apodization for energy conservation
+        safe_cos = torch.where(self.pupil_mask, cos_theta, torch.ones_like(cos_theta))
+        M = M / torch.sqrt(safe_cos)  # aplanatic apodization combined with Jacobian
         M = M * self.pupil_mask.to(M.dtype)  # reassert pupil mask
         self.register_buffer("cos_theta", cos_theta)
         self.register_buffer("polarization_rot", M)
@@ -218,6 +219,7 @@ class BeamPropagator(nn.Module):
         zernike_bank = torch.stack([item[3] for item in zernike_list])
         self.register_buffer("zernike_bank", zernike_bank)
         self.register_buffer("nm_indices", nm_indices)
+        self.num_aberrations = zernike_bank.shape[0]
 
     def _calculate_object_frequencies(self) -> tuple[float, float]:
         """
@@ -261,7 +263,7 @@ class BeamPropagator(nn.Module):
         separated by the 3 output polarizations for each of the 2 input polarizations.
         """
         B = field.shape[0]
-        prop_phase = self.k0 * (z.view(B, 1, 1) + self.focal_length) * self.cos_theta  # [B, H, W]
+        prop_phase = self.k0 * z.view(B, 1, 1) * self.cos_theta  # [B, H, W]
         prop_field = field * torch.exp(1j * prop_phase)
         prop_field = prop_field.view(B, 1, 1, self.pupil_grid_size, self.pupil_grid_size)
         prop_field = prop_field * self.polarization_rot.unsqueeze(0)  # [B, 3, 2, H, W]
