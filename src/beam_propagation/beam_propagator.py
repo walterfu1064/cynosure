@@ -32,40 +32,14 @@ The use of Debye-Wolf implies the following approximations:
 """
 
 
-from dataclasses import dataclass, field
-from typing import NamedTuple
+from typing import NamedTuple, Optional
 
 import torch
 import torch.nn as nn
 
+from config import SimulationConfig, OpticalConfig, ZernikeConfig
 from czt import ChirpZTransform2D
-from zernike import generate_zernike_polynomial, get_noll_index
-
-
-@dataclass
-class SimulationConfig:
-    """Parameters relating to the physical situation is digitized"""
-    pupil_grid_size: int
-    object_grid_size: int
-    object_pixel_size: float
-
-
-@dataclass
-class OpticalConfig:
-    """Parameters related to the physical imaging system"""
-    wavelength: float
-    focal_length: float
-    numerical_aperture: float
-
-
-@dataclass
-class ZernikeConfig:
-    """
-    Defines a max N for a Zernike bank.
-    Optionally only includes specific (n, m) elements.
-    """
-    max_n: int
-    allowed_nm: list[tuple[int, int]] = field(default_factory=list)
+from zernike import ZernikeProjector
 
 
 class GridCollection(NamedTuple):
@@ -81,8 +55,9 @@ class BeamPropagator(nn.Module):
             self,
             sim_cfg: SimulationConfig,
             optics_cfg: OpticalConfig,
-            zernike_cfg: ZernikeConfig,
+            phase_cfg: ZernikeConfig,
             *,
+            amp_cfg: Optional[ZernikeConfig] = None,
             ftype: torch.dtype = torch.float64,
             ctype: torch.dtype = torch.complex128,
     ):
@@ -96,6 +71,13 @@ class BeamPropagator(nn.Module):
         self.k0 = 2 * torch.pi / self.wavelength
         self.focal_length = optics_cfg.focal_length
         self.numerical_aperture = optics_cfg.numerical_aperture
+        self.aperture_type = optics_cfg.aperture_type
+
+        if self.aperture_type not in ("flat", "gaussian", "supergaussian", "fitted"):
+            raise ValueError(
+                f"Unknown aperture type: {self.aperture_type} "
+                "(allowed options are `flat`, `gaussian`, `supergaussian`, `fitted`)"
+            )
 
         self.ftype = ftype
         self.ctype = ctype
@@ -103,7 +85,16 @@ class BeamPropagator(nn.Module):
         self._setup_pupil_coordinates()
         self._setup_object_coordinates()
         self._setup_polarization_factors()
-        self._setup_zernike_basis(zernike_cfg)
+
+        self.phase_projector = ZernikeProjector(phase_cfg, self.pupil_r_norm, self.pupil_phi)
+        self.num_phase_coefs = self.phase_projector.num_elements
+
+        if amp_cfg is not None:
+            self.amp_projector = ZernikeProjector(amp_cfg, self.pupil_r_norm, self.pupil_phi)
+            self.num_amp_coefs = self.amp_projector.num_elements
+        else:
+            self.amp_projector = None
+            self.num_amp_coefs = 0
 
         start_frequency, stop_frequency = self._calculate_object_frequencies()
         self.czt = ChirpZTransform2D(
@@ -195,32 +186,6 @@ class BeamPropagator(nn.Module):
         self.register_buffer("cos_theta", cos_theta)
         self.register_buffer("polarization_rot", M)
 
-    def _setup_zernike_basis(self, zernike_cfg: ZernikeConfig) -> None:
-        """
-        Builds a [num_zernikes, H, W] tensor of precalculated Zernike polynomials in the pupil plane.
-        Also constructs an array of the corresponding Zernike indices. Both this and the Zernike
-        bank are ordered by increasing Noll index.
-        """
-
-        max_n = zernike_cfg.max_n
-        allowed_nm = set([tuple(nm) for nm in zernike_cfg.allowed_nm])
-
-        zernike_list = []
-        for n in range(max_n+1):
-            for m in range(-n, n+1, 2):
-                j = get_noll_index(n, m)
-                z = generate_zernike_polynomial(self.pupil_r_norm, self.pupil_phi, n, m, mask_to_unit_disk=True)
-                if allowed_nm and not (n, m) in allowed_nm:
-                    continue
-                zernike_list.append((j, n, m, z))
-        zernike_list = sorted(zernike_list, key=lambda x: x[0])  # sort by Noll index
-
-        nm_indices = torch.tensor([item[1:3] for item in zernike_list], dtype=torch.long)
-        zernike_bank = torch.stack([item[3] for item in zernike_list])
-        self.register_buffer("zernike_bank", zernike_bank)
-        self.register_buffer("nm_indices", nm_indices)
-        self.num_aberrations = zernike_bank.shape[0]
-
     def _calculate_object_frequencies(self) -> tuple[float, float]:
         """
         Returns the CZT start/end frequencies that sample the object grid.
@@ -231,27 +196,50 @@ class BeamPropagator(nn.Module):
         max_frequency = self.object_radius / (self.wavelength * self.focal_length)
         return -max_frequency, max_frequency
 
-    def _construct_aperture_field(self) -> torch.Tensor:
+    def _construct_aperture_field(self, amp_coefs: Optional[torch.Tensor] = None) -> torch.Tensor:
         """
-        Constructs a complex field that fills the aperture.
+        Constructs a complex field at the aperture plane.
+        Field might be flat, gaussian, supergaussian (m=8), or fitted (using the given Zernike coefficients).
+        Output is always masked by `self.pupil_mask` before returning.
 
-        Currently starts with a field that fills the pupil uniformly, but might introduce
-        vignetting or an amplitude Zernike decomposition later.
+        Flat aperture:
+            Returns a [1, pupil_grid, pupil_grid] tensor of ones.
+        Gaussian aperture:
+            Returns a [1, pupil_grid, pupil_grid] tensor.
+            Scaled to 50% intensity at r=0.5, 6.25% intensity at r=1.0.
+        Supergaussian aperture:
+            Returns a [1, pupil_grid, pupil_grid] tensor.
+            Scaled to 50% intensity at r=0.75, 0.1% intensity at r=1.0.
+        Zernike aperture:
+            Requires `amp_coefs` to be passed as a [B, N] tensor.
+            Returns a [B, pupil_grid, pupil_grid] tensor.
         """
-        field = self.pupil_mask.to(self.ctype)  # [pupil_grid, pupil_grid]
-        return field
+        device = self.pupil_r_norm.device
+        match self.aperture_type:
+            case "flat":
+                field = torch.ones((self.pupil_grid_size, self.pupil_grid_size), device=device)
+            case "gaussian":
+                field = torch.exp(-0.5 * torch.pow(self.pupil_r_norm * 1.665, 2)).unsqueeze(0)
+            case "supergaussian":
+                field = torch.exp(-0.5 * torch.pow(self.pupil_r_norm * 1.274, 8)).unsqueeze(0)
+            case "fitted":
+                if amp_coefs is None:
+                    raise ValueError("Unable to construct fitted aperture field with amp_aberrations = None")
+                field = self.amp_projector(amp_coefs)
+            case _:
+                raise ValueError(f"Unknown aperture type: {self.aperture_type}")
+        return field * self.pupil_mask.to(self.ctype)
 
-    def _aberrate_aperture_field(self, field: torch.Tensor, aberrations: torch.Tensor) -> torch.Tensor:
+    def _aberrate_aperture_field(self, field: torch.Tensor, phase_coefs: torch.Tensor) -> torch.Tensor:
         """
         Aberrates the given (scalar) field.
-        Argument `aberrations` should be a [B, N] batched tensor, where N matches the Zernike bank.
+        Argument `phase_coefs` should be a [B, N] batched tensor, where N matches the Zernike bank.
         Returns a [B, pupil_grid, pupil_grid] batch of fields.
 
         Batch dimension might be literally a batch, or might be multiple propagation distances.
         """
-        B, N = aberrations.shape
-        phase = (aberrations.view(B, N, 1, 1) * self.zernike_bank.unsqueeze(0)).sum(1)  # [B, pupil_grid, pupil_grid]
-        ab_field = field.unsqueeze(0) * torch.exp(2j*torch.pi*phase)
+        phase = self.phase_projector(phase_coefs)
+        ab_field = field * torch.exp(2j*torch.pi*phase)
         return ab_field
 
     def _propagate(self, field: torch.Tensor, z: torch.Tensor) -> torch.Tensor:
@@ -270,15 +258,26 @@ class BeamPropagator(nn.Module):
         prop_field = self.czt(prop_field.flatten(0, 2)).view(B, 3, 2, self.object_grid_size, self.object_grid_size)
         return prop_field
 
-    def forward(self, aberrations: torch.Tensor, z: torch.Tensor) -> torch.Tensor:
+    def forward(
+            self,
+            z: torch.Tensor,
+            phase_coefs: torch.Tensor,
+            amp_coefs: Optional[torch.Tensor] = None
+    ) -> torch.Tensor:
         """
-        Given a batch of aberrations [B, N] and a batch of propagation distances [B,],
-        constructs an aperture field with the given aberrations and propagates it forwards.
-        `z` is measured from the focal plane.
-        Returns the total intensities at the propagation distances.
+        Given a batch of propagation distances, phase Zernike coefficients, and (optionally)
+        amplitude Zernike coefficients, constructs an aberrated aperture field and propagates it forwards.
+
+        Arguments:
+        - z: [B,] tensor of propagation distances, measured from the focal plane
+        - phase_coefs: [B, N_phase] tensor of Zernike coefficients used to phase-aberrate the aperture field
+        - amp_coefs: [B, N_phase] tensor of Zernike coefficients used to amplitude-aberrate the aperture field
+            (Required if and only if `aperture_type` is `fitted`)
+        Returns:
+        - [B, H, W] tensor of the total intensities at the propagation distances
         """
-        field = self._construct_aperture_field()  # [pupil_grid, pupil_grid]
-        ab_field = self._aberrate_aperture_field(field, aberrations)  # [B, pupil_grid, pupil_grid]
+        field = self._construct_aperture_field(amp_coefs)  # [B or 1, pupil_grid, pupil_grid]
+        ab_field = self._aberrate_aperture_field(field, phase_coefs)  # [B, pupil_grid, pupil_grid]
         prop_field = self._propagate(ab_field, z)  # [B, output_pol, input_pol, pupil_grid, pupil_grid]
         intensity = torch.abs(prop_field)**2
         return intensity.sum((1, 2)) / 2  # incoherent polarization sum, returns [B, object_grid, object_grid]

@@ -31,6 +31,7 @@ def params():
 def make_propagator(
         *,
         NA=0.2,
+        aperture_type="flat",
         wavelength=0.5,
         focal_length=5e3,
         pupil_grid_size=255,
@@ -48,14 +49,19 @@ def make_propagator(
         object_grid_size=object_grid_size,
         object_pixel_size=object_pixel_size,
     )
-    opt = OpticalConfig(wavelength=wavelength, focal_length=focal_length, numerical_aperture=NA)
+    opt = OpticalConfig(
+        wavelength=wavelength,
+        focal_length=focal_length,
+        numerical_aperture=NA,
+        aperture_type=aperture_type
+    )
     zer = ZernikeConfig(max_n=max_n)
     return BeamPropagator(sim, opt, zer, ftype=ftype, ctype=ctype)
 
 
 def zero_ab(prop, batch=1):
     """Returns a tensor of zero-aberration coefficients"""
-    return torch.zeros(batch, prop.num_aberrations, dtype=prop.ftype)
+    return torch.zeros(batch, prop.phase_projector.num_elements, dtype=prop.ftype)
 
 
 def analytic_airy(r_abs, wavelength, NA):
@@ -88,7 +94,7 @@ class TestFocalIntensity:
         p = params()
         prop = make_propagator(**p)
         with torch.no_grad():
-            I = prop(zero_ab(prop), torch.zeros(1, dtype=prop.ftype))[0].cpu().numpy()
+            I = prop(torch.zeros(1, dtype=prop.ftype), zero_ab(prop))[0].cpu().numpy()
 
         cy = prop.object_grid_size // 2
         profile = I[cy]
@@ -103,7 +109,7 @@ class TestFocalIntensity:
         """Peak lands on the central pixel for zero aberrations at z=0"""
         prop = make_propagator()
         with torch.no_grad():
-            I = prop(zero_ab(prop), torch.zeros(1, dtype=prop.ftype))[0].cpu().numpy()
+            I = prop(torch.zeros(1, dtype=prop.ftype), zero_ab(prop))[0].cpu().numpy()
         iy, ix = np.unravel_index(np.argmax(I), I.shape)
         c = prop.object_grid_size // 2
         assert (iy, ix) == (c, c)
@@ -113,13 +119,13 @@ class TestFocalIntensity:
         prop = make_propagator()
         z0 = torch.zeros(1, dtype=prop.ftype)
         with torch.no_grad():
-            I0_peak = prop(zero_ab(prop), z0)[0].max().item()
+            I0_peak = prop(z0, zero_ab(prop))[0].max().item()
 
         a = 0.05  # waves RMS
         ab = zero_ab(prop)
         ab[0, 5] = a  # bank index 5 = Noll 6 = astigmatism (n=2, m=2)
         with torch.no_grad():
-            I_ab_peak = prop(ab, z0)[0].max().item()
+            I_ab_peak = prop(z0, ab)[0].max().item()
 
         strehl = I_ab_peak / I0_peak
         marechal = 1.0 - (2 * math.pi * a) ** 2
@@ -131,7 +137,7 @@ class TestSymmetry:
         """Clear circular pupil produces a PSF invariant under 90-degree rotation"""
         prop = make_propagator()
         with torch.no_grad():
-            I = prop(zero_ab(prop), torch.zeros(1, dtype=prop.ftype))[0].cpu().numpy()
+            I = prop(torch.zeros(1, dtype=prop.ftype), zero_ab(prop))[0].cpu().numpy()
         assert np.allclose(I, np.rot90(I), atol=1e-10 * I.max())
 
     def test_z_reversal_symmetry(self):
@@ -139,7 +145,7 @@ class TestSymmetry:
         prop = make_propagator()
         z = torch.tensor([3e-6, -3e-6], dtype=prop.ftype)
         with torch.no_grad():
-            I = prop(zero_ab(prop, batch=2), z).cpu().numpy()
+            I = prop(z, zero_ab(prop, batch=2)).cpu().numpy()
         assert np.allclose(I[0], I[1], atol=1e-10 * I[0].max())
 
 
@@ -160,7 +166,7 @@ class TestAberrations:
         ab = zero_ab(prop)
         ab[0, 1] = a_tilt  # bank index 1 = Noll 2 = x-tilt
         with torch.no_grad():
-            I = prop(ab, torch.zeros(1, dtype=prop.ftype))[0].cpu().numpy()
+            I = prop(torch.zeros(1, dtype=prop.ftype), ab)[0].cpu().numpy()
 
         iy, ix = parabolic_subpixel_peak(I)
         c = prop.object_grid_size // 2
@@ -183,7 +189,7 @@ class TestAberrations:
         B = zs.numel()
 
         with torch.no_grad():
-            I = prop(zero_ab(prop, batch=B), zs).cpu().numpy()
+            I = prop(zs, zero_ab(prop, batch=B)).cpu().numpy()
         c = prop.object_grid_size // 2
         on_axis = I[:, c, c]
         on_axis_n = on_axis / on_axis.max()
@@ -201,12 +207,12 @@ class TestInfrastructure:
         prop = make_propagator()
         B = 4
         torch.manual_seed(0)
-        ab = 0.05 * torch.randn(B, prop.zernike_bank.shape[0], dtype=prop.ftype)
+        ab = 0.05 * torch.randn(B, prop.phase_projector.num_elements, dtype=prop.ftype)
         z = torch.linspace(-1, 1, B, dtype=prop.ftype)
 
         with torch.no_grad():
-            I_batch = prop(ab, z)
-            I_serial = torch.stack([prop(ab[i:i + 1], z[i:i + 1])[0] for i in range(B)])
+            I_batch = prop(z, ab)
+            I_serial = torch.stack([prop(z[i:i + 1], ab[i:i + 1])[0] for i in range(B)])
 
         # Batched FFT routines can accumulate differently; demand relative agreement < 1e-6.
         assert torch.allclose(I_batch, I_serial, atol=1e-6 * I_batch.abs().max())
@@ -214,11 +220,11 @@ class TestInfrastructure:
     def test_differentiable(self):
         """Autograd should flow through the full forward pass and produce finite gradients"""
         prop = make_propagator(pupil_grid_size=127, object_grid_size=127)
-        N = prop.zernike_bank.shape[0]
+        N = prop.phase_projector.num_elements
         ab = torch.full((1, N), 0.05, dtype=prop.ftype, requires_grad=True)
         z = torch.zeros(1, dtype=prop.ftype)
 
-        I = prop(ab, z)
+        I = prop(z, ab)
         I.sum().backward()
 
         assert ab.grad is not None
