@@ -5,8 +5,8 @@ from typing import Literal
 @dataclass
 class SimulationConfig:
     """Parameters relating to the physical situation is digitized"""
-    pupil_grid_size: int
-    object_grid_size: int
+    pupil_grid_size: int  # recommended to be `2^n - 1` for some `n`
+    object_grid_size: int  # recommended to be `2^n - 1` for some `n`
     object_pixel_size: float
 
 
