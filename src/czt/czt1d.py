@@ -21,8 +21,11 @@ Key public methods:
 - freq: accesses the resampled frequencies corresponding to the CZT output
 """
 
+
 import torch
 import torch.nn as nn
+
+from fft_utiliities import next_power_of_2
 
 
 class ChirpZTransform1D(nn.Module):
@@ -88,10 +91,7 @@ class ChirpZTransform1D(nn.Module):
         Returns the length of the convolution kernel, paddded first to avoid wraparound,
         and then further to the next smallest power of 2.
         """
-        L = 1
-        while L < self.num_input_points + self.num_output_points - 1:
-            L *= 2
-        return L
+        return next_power_of_2(self.num_input_points + self.num_output_points - 1)
 
     def _precompute_premultiplier(self, A: torch.Tensor, W: torch.Tensor) -> torch.Tensor:
         """
