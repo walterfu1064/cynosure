@@ -25,7 +25,7 @@ def convolve_psf_with_object(object_distribution: torch.Tensor, psf: torch.Tenso
 
     psf_padded = psf.new_zeros(*psf.shape[:-2], *fft_size)
     psf_padded[..., :H, :W] = psf
-    psf_padded = torch.roll(psf_padded, shifts=(-H // 2, -W // 2), dims=(-2, -1))
+    psf_padded = torch.roll(psf_padded, shifts=(-(H // 2), -(W // 2)), dims=(-2, -1))
     psf_fft = torch.fft.rfft2(psf_padded, dim=(-2, -1))
 
     obj_fft = torch.fft.rfft2(object_distribution, s=fft_size, dim=(-2, -1))
