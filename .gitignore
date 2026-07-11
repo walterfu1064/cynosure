@@ -314,3 +314,8 @@ poetry.toml
 pyrightconfig.json
 
 # End of https://www.toptal.com/developers/gitignore/api/python,jupyternotebooks,pycharm,linux
+
+# Ignore the full third-party dataset (Zenodo record 10522322, Miora et al., CC BY 4.0), only
+# small patches are committed at `examples/`. See `examples/README.md`.
+/data/*
+!/data/README.md

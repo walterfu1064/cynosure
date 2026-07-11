@@ -18,3 +18,20 @@ Features I might add in the future:
 * exposing arbitrary polarizations
 * more complex imaging systems
 * phase retrieval and aberration fitting
+
+Example data credits:
+The bead patches in the `examples` folder are cropped from the open-access dataset of
+R. H. D. Miora et al., "Experimental validation of numerical point spread function
+calculation including aberration estimation," Opt. Express 32(12), pp. 21887-21908 (2024),
+https://opg.optica.org/oe/fulltext.cfm?uri=oe-32-12-21887 (last accessed 2026/07/10).
+The dataset (Zenodo DOI [10.5281/zenodo.10522322] (https://zenodo.org/records/10522322))
+is licensed under CC BY 4.0, and the patches are redistributed here under the same license.
+See [`examples/README.md`](examples/README.md) for the exact source files, crop parameters,
+and imaging parameters.
+
+## License
+
+The source code and documentation in this repository are licensed under the
+[MIT License](LICENSE). The example data patches in [`examples/`](examples/) are
+derived from the third-party dataset above and are redistributed under CC BY 4.0;
+see [`examples/README.md`](examples/README.md) for full attribution.
