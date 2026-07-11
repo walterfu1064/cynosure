@@ -196,9 +196,9 @@ class BeamPropagator(nn.Module):
         max_frequency = self.object_radius / (self.wavelength * self.focal_length)
         return -max_frequency, max_frequency
 
-    def _construct_aperture_field(self, amp_coefs: Optional[torch.Tensor] = None) -> torch.Tensor:
+    def get_aperture_amplitude(self, amp_coefs: Optional[torch.Tensor] = None) -> torch.Tensor:
         """
-        Constructs a complex field at the aperture plane.
+        Constructs the field amplitude at the aperture plane as a real tensor.
         Field might be flat, gaussian, supergaussian (m=8), or fitted (using the given Zernike coefficients).
         Output is always masked by `self.pupil_mask` before returning.
 
@@ -228,19 +228,26 @@ class BeamPropagator(nn.Module):
                 field = self.amp_projector(amp_coefs)
             case _:
                 raise ValueError(f"Unknown aperture type: {self.aperture_type}")
-        return field * self.pupil_mask.to(self.ctype)
+        return field * self.pupil_mask.to(self.ftype)
 
-    def _aberrate_aperture_field(self, field: torch.Tensor, phase_coefs: torch.Tensor) -> torch.Tensor:
+    def get_aperture_phase(self, phase_coefs: torch.Tensor) -> torch.Tensor:
         """
-        Aberrates the given (scalar) field.
-        Argument `phase_coefs` should be a [B, N] batched tensor, where N matches the Zernike bank.
-        Returns a [B, pupil_grid, pupil_grid] batch of fields.
-
-        Batch dimension might be literally a batch, or might be multiple propagation distances.
+        Constructs the field phase at the aperture plane as a real tensor.
+        Output is masked by `self.pupil_mask` before returning.
         """
         phase = self.phase_projector(phase_coefs)
-        ab_field = field * torch.exp(2j*torch.pi*phase)
-        return ab_field
+        return phase * self.pupil_mask.to(self.ftype)
+
+    def get_aperture_field(
+            self,
+            phase_coefs: torch.Tensor,
+            amp_coefs: Optional[torch.Tensor] = None
+    ) -> torch.Tensor:
+        """Combines the aperture amplitude and phase into a complex field"""
+        amplitude = self.get_aperture_amplitude(amp_coefs)
+        phase = self.get_aperture_phase(phase_coefs)
+        field = amplitude * torch.exp(2j*torch.pi*phase)
+        return field
 
     def _propagate(self, field: torch.Tensor, z: torch.Tensor) -> torch.Tensor:
         """
@@ -276,8 +283,7 @@ class BeamPropagator(nn.Module):
         Returns:
         - [B, H, W] tensor of the total intensities at the propagation distances
         """
-        field = self._construct_aperture_field(amp_coefs)  # [B or 1, pupil_grid, pupil_grid]
-        ab_field = self._aberrate_aperture_field(field, phase_coefs)  # [B, pupil_grid, pupil_grid]
-        prop_field = self._propagate(ab_field, z)  # [B, output_pol, input_pol, pupil_grid, pupil_grid]
+        aperture_field = self.get_aperture_field(phase_coefs, amp_coefs)  # [B, pupil_grid, pupil_grid]
+        prop_field = self._propagate(aperture_field, z)  # [B, output_pol, input_pol, pupil_grid, pupil_grid]
         intensity = torch.abs(prop_field)**2
         return intensity.sum((1, 2)) / 2  # incoherent polarization sum, returns [B, object_grid, object_grid]
