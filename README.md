@@ -19,7 +19,8 @@ Features I might add in the future:
 * more complex imaging systems
 * phase retrieval and aberration fitting
 
-Example data credits:
+
+## Example data credits:
 The bead patches in the `examples` folder are cropped from the open-access dataset of
 R. H. D. Miora et al., "Experimental validation of numerical point spread function
 calculation including aberration estimation," Opt. Express 32(12), pp. 21887-21908 (2024),
@@ -28,6 +29,7 @@ The dataset (Zenodo DOI [10.5281/zenodo.10522322] (https://zenodo.org/records/10
 is licensed under CC BY 4.0, and the patches are redistributed here under the same license.
 See [`examples/README.md`](examples/README.md) for the exact source files, crop parameters,
 and imaging parameters.
+
 
 ## License
 
