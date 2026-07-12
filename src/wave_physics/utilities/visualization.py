@@ -3,7 +3,7 @@ import matplotlib.pyplot as pyplot
 
 import torch
 
-from beam_propagation.beam_propagator import BeamPropagator
+from ..beam_propagation.beam_propagator import BeamPropagator
 
 
 def plot_stack(stack: np.ndarray, panel_size: float = 3):

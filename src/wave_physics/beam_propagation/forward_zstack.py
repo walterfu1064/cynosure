@@ -13,9 +13,9 @@ import torch
 import torch.nn as nn
 from torch.nn import Parameter
 
-from beam_propagation import BeamPropagator
-from config import SimulationConfig, OpticalConfig, ZernikeConfig
-from utilities.fft_utiliities import convolve_psf_with_object
+from . import BeamPropagator
+from ..config import SimulationConfig, OpticalConfig, ZernikeConfig
+from ..utilities.fft_utilities import convolve_psf_with_object
 
 
 class ForwardZstack(nn.Module):

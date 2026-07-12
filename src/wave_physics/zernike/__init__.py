@@ -5,4 +5,3 @@ from .zernike_polynomials import (
     get_angular_term,
 )
 from .zernike_projector import ZernikeConfig, ZernikeProjector
-

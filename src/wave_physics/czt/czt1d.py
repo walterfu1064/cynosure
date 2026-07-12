@@ -25,7 +25,7 @@ Key public methods:
 import torch
 import torch.nn as nn
 
-from utilities.fft_utiliities import next_power_of_2
+from ..utilities.fft_utilities import next_power_of_2
 
 
 class ChirpZTransform1D(nn.Module):

@@ -9,7 +9,7 @@ the execution order, as in this example, the CZT will be calculated first along 
 import torch
 import torch.nn as nn
 
-from czt.czt1d import ChirpZTransform1D
+from .czt1d import ChirpZTransform1D
 
 
 class ChirpZTransform2D(nn.Module):

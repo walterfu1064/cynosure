@@ -15,7 +15,7 @@
     build-backend = "hatchling.build"
 
     [tool.hatch.build.targets.wheel]
-    packages = ["src/czt", "src/zernike", "src/beam_propagation"]
+    packages = ["src/wave_physics"]
 
     [dependency-groups]
     dev = [

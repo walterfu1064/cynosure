@@ -1,8 +1,8 @@
 import torch
 import torch.nn as nn
 
-from zernike import generate_zernike_polynomial, get_noll_index
-from config import ZernikeConfig
+from .zernike_polynomials import generate_zernike_polynomial, get_noll_index
+from ..config import ZernikeConfig
 
 
 class ZernikeProjector(nn.Module):

@@ -6,8 +6,8 @@ import numpy as np
 import pytest
 import torch
 
-from czt.czt1d import ChirpZTransform1D
-from czt.czt2d import ChirpZTransform2D
+from wave_physics.czt.czt1d import ChirpZTransform1D
+from wave_physics.czt.czt2d import ChirpZTransform2D
 
 
 def params_1d():

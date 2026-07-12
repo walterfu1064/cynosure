@@ -42,9 +42,9 @@ from typing import NamedTuple, Optional
 import torch
 import torch.nn as nn
 
-from config import SimulationConfig, OpticalConfig, ZernikeConfig
-from czt import ChirpZTransform2D
-from zernike import ZernikeProjector
+from ..config import SimulationConfig, OpticalConfig, ZernikeConfig
+from ..czt import ChirpZTransform2D
+from ..zernike import ZernikeProjector
 
 
 class GridCollection(NamedTuple):
