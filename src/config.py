@@ -9,16 +9,20 @@ within that constraint.
 from dataclasses import dataclass, field
 from typing import Literal
 
+import torch
 
-@dataclass
+
+@dataclass(frozen=True, slots=True)
 class SimulationConfig:
     """Parameters relating to the physical situation is digitized"""
     pupil_grid_size: int  # recommended to be `2^n - 1` for some `n`
     object_grid_size: int  # recommended to be `2^n - 1` for some `n`
     object_pixel_size: float
+    ftype: torch.dtype = torch.float64
+    ctype: torch.dtype = torch.complex128
 
 
-@dataclass
+@dataclass(frozen=True, slots=True)
 class OpticalConfig:
     """Parameters related to the physical imaging system"""
     wavelength: float
@@ -29,7 +33,7 @@ class OpticalConfig:
     immersion_index: float | None = None  # objective's immersion (defaults to no interface/no z-rescaling)
 
 
-@dataclass
+@dataclass(frozen=True, slots=True)
 class ZernikeConfig:
     """
     Defines a max N for a Zernike bank.

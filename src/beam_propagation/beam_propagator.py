@@ -63,8 +63,6 @@ class BeamPropagator(nn.Module):
             phase_cfg: ZernikeConfig,
             *,
             amp_cfg: Optional[ZernikeConfig] = None,
-            ftype: torch.dtype = torch.float64,
-            ctype: torch.dtype = torch.complex128,
     ):
         super().__init__()
 
@@ -102,8 +100,8 @@ class BeamPropagator(nn.Module):
                 "(allowed options are `flat`, `gaussian`, `supergaussian`, `fitted`)"
             )
 
-        self.ftype = ftype
-        self.ctype = ctype
+        self.ftype = sim_cfg.ftype
+        self.ctype = sim_cfg.ctype
 
         self._setup_pupil_coordinates()
         self._setup_object_coordinates()
@@ -111,14 +109,11 @@ class BeamPropagator(nn.Module):
         self._setup_axial_wavenumbers()
 
         self.phase_projector = ZernikeProjector(phase_cfg, self.pupil_r_norm, self.pupil_phi)
-        self.num_phase_coefs = self.phase_projector.num_elements
 
         if amp_cfg is not None:
             self.amp_projector = ZernikeProjector(amp_cfg, self.pupil_r_norm, self.pupil_phi)
-            self.num_amp_coefs = self.amp_projector.num_elements
         else:
             self.amp_projector = None
-            self.num_amp_coefs = 0
 
         start_frequency, stop_frequency = self._calculate_object_frequencies()
         self.czt = ChirpZTransform2D(
@@ -127,9 +122,21 @@ class BeamPropagator(nn.Module):
             input_step=self.pupil_dx,
             start_frequency=start_frequency,
             end_frequency=stop_frequency,
-            ftype=ftype,
-            ctype=ctype,
+            ftype=self.ftype,
+            ctype=self.ctype,
         )
+
+    @property
+    def num_phase_coefs(self) -> int:
+        """Convenience pass-through"""
+        return self.phase_projector.num_elements
+
+    @property
+    def num_amp_coefs(self) -> int:
+        """Convenience pass-through"""
+        if self.amp_projector is None:
+            return 0
+        return self.amp_projector.num_elements
 
     @staticmethod
     def _construct_normalized_coordinates(grid_size: int, dtype: torch.dtype) -> GridCollection:
@@ -302,7 +309,7 @@ class BeamPropagator(nn.Module):
         Returns a [B, output_pol, input_pol, object_grid, object_grid] batch of fields,
         separated by the 3 output polarizations for each of the 2 input polarizations.
         """
-        B = field.shape[0]
+        B = z.shape[0]
         prop_phase = z.view(B, 1, 1) * self.axial_wavenumber  # [B, H, W]
         prop_field = field * torch.exp(1j * prop_phase)
         prop_field = prop_field.view(B, 1, 1, self.pupil_grid_size, self.pupil_grid_size)
