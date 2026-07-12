@@ -38,6 +38,8 @@ def make_propagator(
         object_grid_size=255,
         samples_per_airy_radius=10.0,
         max_n=4,
+        medium_index=1.0,
+        immersion_index=None,
         ftype=torch.float64,
         ctype=torch.complex128,
 ):
@@ -53,7 +55,9 @@ def make_propagator(
         wavelength=wavelength,
         focal_length=focal_length,
         numerical_aperture=NA,
-        aperture_type=aperture_type
+        aperture_type=aperture_type,
+        medium_index=medium_index,
+        immersion_index=immersion_index,
     )
     zer = ZernikeConfig(max_n=max_n)
     return BeamPropagator(sim, opt, zer, ftype=ftype, ctype=ctype)
@@ -199,6 +203,88 @@ class TestAberrations:
 
         rmse = float(np.sqrt(np.mean((on_axis_n - analytic) ** 2)))
         assert rmse < 5e-3
+
+
+class TestMediumIndex:
+    def test_na_exceeds_medium_raises(self):
+        """NA = medium_index * sin(theta_max), so NA cannot exceed the medium index"""
+        with pytest.raises(ValueError, match="medium"):
+            make_propagator(NA=0.95, medium_index=0.9)
+
+    def test_na_exceeds_immersion_raises(self):
+        """NA cannot exceed the immersion index either"""
+        with pytest.raises(ValueError, match="immersion"):
+            make_propagator(NA=0.95, medium_index=1.5, immersion_index=0.9)
+
+    def test_axial_wavenumber_edge_to_center_ratio(self):
+        """
+        Beam in higher-index medium evovles more slowly, as reflected by the smaller
+        edge-to-center span of `k_z(rho) = k0*sqrt(n^2 - NA^2 rho^2)`. Ratio for
+        air vs. water should match the analytic result:
+            `(n2 - sqrt(n2^2-NA^2))/(1 - sqrt(1-NA^2) = 0.622`
+        """
+        NA, n2 = 0.9, 1.33  # water immersion
+        air = make_propagator(NA=NA, medium_index=1.0)
+        med = make_propagator(NA=NA, medium_index=n2)
+
+        def edge_to_center_span(prop):
+            kz = prop.axial_wavenumber[prop.pupil_mask] / prop.k0  # in units of k0
+            return float(kz.max() - kz.min())
+
+        expected = ((n2 - math.sqrt(n2**2 - NA**2)) / (1.0 - math.sqrt(1.0 - NA**2)))
+        ratio = edge_to_center_span(med) / edge_to_center_span(air)
+        assert ratio == pytest.approx(expected, rel=1e-3)
+
+    def test_axial_sinc_scales_with_medium(self):
+        """On-axis intensity vs. z follows sinc^2, with the first axial zero moving as 2*n*wl/NA^2"""
+        NA, wl, n = 0.1, 0.5, 1.33  # water immersion
+        prop = make_propagator(
+            NA=NA, wavelength=wl, medium_index=n,
+            pupil_grid_size=255, object_grid_size=65,
+            samples_per_airy_radius=6.0,
+        )
+        first_zero = 2 * n * wl / NA ** 2
+        zs = torch.linspace(-0.6 * first_zero, 0.6 * first_zero, 13, dtype=prop.ftype)
+        B = zs.numel()
+
+        with torch.no_grad():
+            I = prop(zs, zero_ab(prop, batch=B)).cpu().numpy()
+        c = prop.object_grid_size // 2
+        on_axis = I[:, c, c]
+        on_axis_n = on_axis / on_axis.max()
+
+        x = zs.cpu().numpy() * NA ** 2 / (2 * n * wl)
+        analytic = np.sinc(x) ** 2
+
+        rmse = float(np.sqrt(np.mean((on_axis_n - analytic) ** 2)))
+        assert rmse < 5e-3
+
+
+class TestAxialScaling:
+    def test_matched_immersion_is_identity(self):
+        """With no immersion mismatch (default), the objective -> defocus scaling is 1"""
+        prop = make_propagator(NA=0.2, medium_index=1.4)
+        assert prop.axial_scale == pytest.approx(1.0)
+        z = torch.linspace(-3, 3, 7, dtype=prop.ftype)
+        assert torch.allclose(prop.defocus_from_objective_z(z), z)
+
+    def test_mismatch_scale_is_immersion_over_medium(self):
+        """Under a mismatch, nominal objective positions rescale by immersion_index/medium_index"""
+        n1, n2 = 1.0, 1.5
+        prop = make_propagator(NA=0.2, medium_index=n2, immersion_index=n1)
+        assert prop.axial_scale == pytest.approx(n1 / n2)
+        z = torch.linspace(-3, 3, 7, dtype=prop.ftype)
+        assert torch.allclose(prop.defocus_from_objective_z(z), z * (n1 / n2))
+
+    def test_scaling_only_affects_axis_not_focusing(self):
+        """PSFs under different immersion indices should be identical at a given, in-medium, defocus"""
+        matched = make_propagator(NA=0.2, medium_index=1.5)
+        mismatched = make_propagator(NA=0.2, medium_index=1.5, immersion_index=1.0)
+        z = torch.tensor([0.0, 1.5], dtype=matched.ftype)
+        with torch.no_grad():
+            I_matched = matched(z, zero_ab(matched, batch=2))
+            I_mismatched = mismatched(z, zero_ab(mismatched, batch=2))
+        assert torch.allclose(I_matched, I_mismatched)
 
 
 class TestInfrastructure:
