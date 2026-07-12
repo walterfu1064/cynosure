@@ -7,6 +7,7 @@
     dependencies = [
         "tifffile>=2026.6.1",
         "torch>=2.11.0",
+        "tqdm>=4.68.4",
 ]
 
     [build-system]

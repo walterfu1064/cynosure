@@ -31,4 +31,3 @@ def convolve_psf_with_object(object_distribution: torch.Tensor, psf: torch.Tenso
     obj_fft = torch.fft.rfft2(object_distribution, s=fft_size, dim=(-2, -1))
     result = torch.fft.irfft2(obj_fft * psf_fft, s=fft_size, dim=(-2, -1))
     return result[..., :H, :W]
-

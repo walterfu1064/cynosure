@@ -10,7 +10,7 @@ import torch
 import torch.nn as nn
 
 from beam_propagation import BeamPropagator
-from fft_utiliities import convolve_psf_with_object
+from utilities.fft_utiliities import convolve_psf_with_object
 
 
 class ForwardModel(nn.Module):
