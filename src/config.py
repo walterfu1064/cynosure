@@ -1,3 +1,11 @@
+"""
+Config dataclasses that define the simulation and physical parameters.
+
+The units of dimensional quantities (`object_pixel_size`, `wavelength`, `focal_length`)
+must all be identical (and must also be shared by the z-positions), but are arbitrary
+within that constraint.
+"""
+
 from dataclasses import dataclass, field
 from typing import Literal
 
@@ -15,8 +23,10 @@ class OpticalConfig:
     """Parameters related to the physical imaging system"""
     wavelength: float
     focal_length: float
-    numerical_aperture: float
+    numerical_aperture: float  # `medium_index * sin(theta_max)`
     aperture_type: Literal["flat", "gaussian", "supergaussian", "fitted"]
+    medium_index: float  # emitter's embedding medium
+    immersion_index: float | None = None  # objective's immersion (defaults to no interface/no z-rescaling)
 
 
 @dataclass

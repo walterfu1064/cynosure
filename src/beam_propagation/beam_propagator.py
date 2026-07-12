@@ -29,6 +29,11 @@ The use of Debye-Wolf implies the following approximations:
 - light is monochromatic
 - evanescent waves are negligible
 - the pupil and the propagation distance are both much larger than the wavelength (so Kirchhoff boundaries apply near the pupil)
+
+Models a system where the objective is immersed in some medium `immersion_index`, and the
+emitters are embedded in some medium `medium_index`. Input z-positions should represent the
+defocus in the immersion medium, **not** the physical positions of the objective.
+The `defocus_from_objective_z` function is provided to perform this conversion.
 """
 
 
@@ -71,7 +76,25 @@ class BeamPropagator(nn.Module):
         self.k0 = 2 * torch.pi / self.wavelength
         self.focal_length = optics_cfg.focal_length
         self.numerical_aperture = optics_cfg.numerical_aperture
+        self.medium_index = optics_cfg.medium_index
+        self.immersion_index = optics_cfg.immersion_index if optics_cfg.immersion_index is not None else self.medium_index
         self.aperture_type = optics_cfg.aperture_type
+
+        if self.numerical_aperture > self.medium_index:
+            raise ValueError(
+                f"Numerical aperture ({self.numerical_aperture}) cannot exceed "
+                f"the medium index ({self.medium_index})"
+            )
+        if self.numerical_aperture > self.immersion_index:
+            raise ValueError(
+                f"Numerical aperture ({self.numerical_aperture}) cannot exceed "
+                f"the immersion index ({self.immersion_index})"
+            )
+
+        # Objective is immersed in n1, sample medium is n2 -> physically moving the objective
+        # by dz moves the focal plane by (n1/n2)*dz, so we need to rescale z.
+        # Identity scaling for indexed-matched systems (default when immersion_index == None).
+        self.axial_scale = self.immersion_index / self.medium_index
 
         if self.aperture_type not in ("flat", "gaussian", "supergaussian", "fitted"):
             raise ValueError(
@@ -85,6 +108,7 @@ class BeamPropagator(nn.Module):
         self._setup_pupil_coordinates()
         self._setup_object_coordinates()
         self._setup_polarization_factors()
+        self._setup_axial_wavenumbers()
 
         self.phase_projector = ZernikeProjector(phase_cfg, self.pupil_r_norm, self.pupil_phi)
         self.num_phase_coefs = self.phase_projector.num_elements
@@ -164,8 +188,8 @@ class BeamPropagator(nn.Module):
         Requires `_setup_pupil_coordinates` to have already been called.
         """
 
-        # Spherical coordinates in the pupil frame (z along the optical axis, phi azimuthal, theta polar):
-        sin_theta = torch.clamp(self.numerical_aperture * self.pupil_r_norm, max=1.0)
+        # Spherical coordinates in the pupil frame (z along the optical axis, phi azimuthal, theta polar in medium):
+        sin_theta = torch.clamp(self.numerical_aperture * self.pupil_r_norm / self.medium_index, max=1.0)
         cos_theta = torch.sqrt(torch.clamp(1 - sin_theta**2, min=0.0))
         cos_phi = torch.cos(self.pupil_phi)
         sin_phi = torch.sin(self.pupil_phi)
@@ -185,6 +209,19 @@ class BeamPropagator(nn.Module):
         M = M * self.pupil_mask.to(M.dtype)  # reassert pupil mask
         self.register_buffer("cos_theta", cos_theta)
         self.register_buffer("polarization_rot", M)
+
+    def _setup_axial_wavenumbers(self) -> None:
+        """
+        Precomputes the axial wavenumber k_z(rho) = k0 * sqrt(n^2 - NA^2 * rho^2) that governs
+        defocus in the focusing medium (n = `medium_index`). The transverse wavenumber
+        NA * rho * k0 is conserved across  interfaces, so emissions from a bead in medium n
+        evolve at this modified k_z.
+
+        Requires `_setup_pupil_coordinates` to have already been called.
+        """
+        transverse = self.numerical_aperture * self.pupil_r_norm
+        kz = self.k0 * torch.sqrt(torch.clamp(self.medium_index**2 - transverse**2, min=0.0))
+        self.register_buffer("axial_wavenumber", kz)
 
     def _calculate_object_frequencies(self) -> tuple[float, float]:
         """
@@ -249,16 +286,24 @@ class BeamPropagator(nn.Module):
         field = amplitude * torch.exp(2j*torch.pi*phase)
         return field
 
+    def defocus_from_objective_z(self, objective_z: torch.Tensor) -> torch.Tensor:
+        """
+        Converts nominal z-positions (physical objective travel) in the immersion medium to
+        the in-medium defocus that `forward` and `_propagate` expect using the index-mismatch
+        axial scale factor. No-op for index-matched systems.
+        """
+        return objective_z * self.axial_scale
+
     def _propagate(self, field: torch.Tensor, z: torch.Tensor) -> torch.Tensor:
         """
         Propagates the given (scalar) field to the given z positions.
         Takes `field` as [B, pupil_grid, pupil_grid], and `z` as [B,].
-        `z` is measured from the focal plane.
+        `z` is the defocus in the focusing medium (see `defocus_from_objective_z`), measured from the focal plane.
         Returns a [B, output_pol, input_pol, object_grid, object_grid] batch of fields,
         separated by the 3 output polarizations for each of the 2 input polarizations.
         """
         B = field.shape[0]
-        prop_phase = self.k0 * z.view(B, 1, 1) * self.cos_theta  # [B, H, W]
+        prop_phase = z.view(B, 1, 1) * self.axial_wavenumber  # [B, H, W]
         prop_field = field * torch.exp(1j * prop_phase)
         prop_field = prop_field.view(B, 1, 1, self.pupil_grid_size, self.pupil_grid_size)
         prop_field = prop_field * self.polarization_rot.unsqueeze(0)  # [B, 3, 2, H, W]
@@ -276,7 +321,7 @@ class BeamPropagator(nn.Module):
         amplitude Zernike coefficients, constructs an aberrated aperture field and propagates it forwards.
 
         Arguments:
-        - z: [B,] tensor of propagation distances, measured from the focal plane
+        - z: [B,] defocus in the focusing medium (see `defocus_from_objective_z`), measured from the focal plane
         - phase_coefs: [B, N_phase] tensor of Zernike coefficients used to phase-aberrate the aperture field
         - amp_coefs: [B, N_phase] tensor of Zernike coefficients used to amplitude-aberrate the aperture field
             (Required if and only if `aperture_type` is `fitted`)
