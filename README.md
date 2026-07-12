@@ -17,7 +17,6 @@ adapted to work with arbitrarily-polarized beams (which I might expose in the fu
 Features I might add in the future:
 * exposing arbitrary polarizations
 * more complex imaging systems
-* phase retrieval and aberration fitting
 
 
 ## Example data credits:
