@@ -9,7 +9,7 @@ import pytest
 import torch
 from scipy.special import j1
 
-from wave_physics.beam_propagation.beam_propagator import (
+from cynosure.beam_propagation.beam_propagator import (
     BeamPropagator, SimulationConfig, OpticalConfig, ZernikeConfig,
 )
 

@@ -1,5 +1,5 @@
     [project]
-    name = "wave-physics"
+    name = "cynosure"
     version = "0.1.0"
     description = "PyTorch-based tools for simulating optical aberrations in high-NA imaging systems"
     readme = "README.md"
@@ -15,7 +15,7 @@
     build-backend = "hatchling.build"
 
     [tool.hatch.build.targets.wheel]
-    packages = ["src/wave_physics"]
+    packages = ["src/cynosure"]
 
     [dependency-groups]
     dev = [

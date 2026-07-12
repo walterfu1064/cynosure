@@ -7,7 +7,7 @@ import math
 import pytest
 import torch
 
-from wave_physics.zernike import generate_zernike_polynomial, get_noll_index
+from cynosure.zernike import generate_zernike_polynomial, get_noll_index
 
 
 # Canonical Noll (j, n, m) triples:

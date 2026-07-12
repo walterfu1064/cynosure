@@ -1,4 +1,7 @@
-# wave-physics
+# cynosure
+
+> **cynosure** (*n.*) - a focal point; something that guides. From Greek κυνόσουρα,
+> "dog's tail," the old name for Ursa Minor, whose tail-tip is the guide star Polaris. Dogs are good.
 
 Tools for modeling beam propagation using Debye-Wolf theory.
 
