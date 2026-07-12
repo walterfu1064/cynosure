@@ -24,7 +24,7 @@ SOFTWARE.
 
 The MIT license above covers the source code and documentation authored in this
 repository. It does NOT cover the example data patches in `examples/`
-(`bead_patch_*.tif`), which are derived from a third-party dataset (Zenodo record
+(`bead_patch_*.tiff`), which are derived from a third-party dataset (Zenodo record
 10522322, Miora et al.) and are redistributed under the Creative Commons
 Attribution 4.0 International (CC BY 4.0) license. See `examples/README.md` for
 full attribution.
