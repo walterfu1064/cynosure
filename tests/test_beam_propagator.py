@@ -23,8 +23,6 @@ def params():
         pupil_grid_size=255,
         object_grid_size=255,
         max_n=4,
-        ftype=torch.float64,
-        ctype=torch.complex128,
     )
 
 
@@ -40,8 +38,6 @@ def make_propagator(
         max_n=4,
         medium_index=1.0,
         immersion_index=None,
-        ftype=torch.float64,
-        ctype=torch.complex128,
 ):
     """Builds a low-NA beam propagator for testing against an Airy beam"""
     airy_radius = 1.22 * wavelength / NA
@@ -60,7 +56,7 @@ def make_propagator(
         immersion_index=immersion_index,
     )
     zer = ZernikeConfig(max_n=max_n)
-    return BeamPropagator(sim, opt, zer, ftype=ftype, ctype=ctype)
+    return BeamPropagator(sim, opt, zer)
 
 
 def zero_ab(prop, batch=1):
