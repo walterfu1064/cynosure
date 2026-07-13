@@ -40,4 +40,14 @@ class ZernikeConfig:
     Optionally only includes specific (n, m) elements.
     """
     max_n: int
-    allowed_nm: list[tuple[int, int]] = field(default_factory=list)
+    allowed_nm: tuple[tuple[int, int], ...] = ()
+    num_elements: int = field(init=False)
+
+    def __post_init__(self) -> None:
+        object.__setattr__(self, "allowed_nm", tuple(tuple(nm) for nm in self.allowed_nm))
+        allowed = set(self.allowed_nm)
+        count = sum(
+            1 for n in range(self.max_n + 1) for m in range(-n, n + 1, 2)
+            if not allowed or (n, m) in allowed
+        )
+        object.__setattr__(self, "num_elements", count)

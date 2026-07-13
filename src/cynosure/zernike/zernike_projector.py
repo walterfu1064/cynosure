@@ -29,7 +29,7 @@ class ZernikeProjector(nn.Module):
         """
 
         max_n = zernike_cfg.max_n
-        allowed_nm = set([tuple(nm) for nm in zernike_cfg.allowed_nm])
+        allowed_nm = set(zernike_cfg.allowed_nm)
 
         zernike_list = []
         for n in range(max_n+1):
@@ -45,7 +45,10 @@ class ZernikeProjector(nn.Module):
         zernike_bank = torch.stack([item[3] for item in zernike_list])
         self.register_buffer("zernike_bank", zernike_bank)
         self.register_buffer("nm_indices", nm_indices)
-        self.num_elements = zernike_bank.shape[0]
+        assert zernike_bank.shape[0] == zernike_cfg.num_elements, (
+            f"Zernike bank has {zernike_bank.shape[0]} elements; config says {zernike_cfg.num_elements}"
+        )  # defensive
+        self.num_elements = zernike_cfg.num_elements
 
     def project(self, coefficients: torch.Tensor) -> torch.Tensor:
         """
