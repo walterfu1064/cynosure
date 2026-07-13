@@ -54,7 +54,7 @@ class ZernikeProjector(nn.Module):
         """
         B, N = coefficients.shape
         assert N == self.num_elements, f"ZernikeProjector expected {self.num_elements} coefficients but received {N}"
-        out = (coefficients.view(B, N, 1, 1) * self.zernike_bank.unsqueeze(0)).sum(1)  # [B, H, W]
+        out = torch.einsum("bn,nhw->bhw", coefficients.to(self.zernike_bank.dtype), self.zernike_bank)
         return out
 
     def forward(self, coefficients: torch.Tensor) -> torch.Tensor:
