@@ -12,7 +12,7 @@ Usage:
     Download https://doi.org/10.5281/zenodo.10522322 and unpack it to
     `data/10522322/` at the repo root, then run:
 
-        uv run python examples/extract_patches.py
+        uv run python examples/bead_patches/extract_patches.py
 """
 
 from dataclasses import dataclass
@@ -20,8 +20,9 @@ from pathlib import Path
 
 import tifffile
 
-EXAMPLES_DIR = Path(__file__).resolve().parent
-DATA_ROOT = EXAMPLES_DIR.parent / "data" / "10522322" / "NA095"
+PATCHES_DIR = Path(__file__).resolve().parent
+REPO_ROOT = PATCHES_DIR.parent.parent
+DATA_ROOT = REPO_ROOT / "data" / "10522322" / "NA095"
 HALF_WIDTH = 16  # half-width of the generated crops
 
 @dataclass(frozen=True)
@@ -58,7 +59,7 @@ def main():
         rows = slice(patch.center_row - patch.half_width, patch.center_row + patch.half_width)
         cols = slice(patch.center_column - patch.half_width, patch.center_column + patch.half_width)
         crop = stack[:, rows, cols]
-        output_path = EXAMPLES_DIR / patch.output_name
+        output_path = PATCHES_DIR / patch.output_name
         tifffile.imwrite(output_path, crop)
         print(f"wrote {output_path.name} shape={crop.shape} dtype={crop.dtype}")
 
