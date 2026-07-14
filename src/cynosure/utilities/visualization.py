@@ -17,6 +17,7 @@ def plot_stack(stack: np.ndarray, panel_size: float = 3):
         ax.set_xticks([])
         ax.set_yticks([])
     fig.tight_layout()
+    return fig
 
 
 def plot_field(
@@ -44,3 +45,4 @@ def plot_field(
     ax1.set_title("amplitude")
     ax2.set_title("phase")
     fig.tight_layout()
+    return fig
