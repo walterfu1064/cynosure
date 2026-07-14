@@ -46,6 +46,7 @@ def make_object_distribution(
 class ZstackSolver(pl.LightningModule):
     def __init__(
             self,
+            *,
             sim_cfg: SimulationConfig,
             optics_cfg: OpticalConfig,
             phase_cfg: ZernikeConfig,
@@ -55,7 +56,6 @@ class ZstackSolver(pl.LightningModule):
             z_objective: torch.Tensor,
             object_distribution: torch.Tensor,
             noise_cfg: Optional[NoiseConfig] = None,
-            *,
             learning_rate: float,
             weight_decay: float,
             hidden_channels: Sequence[int] = (16, 32),
