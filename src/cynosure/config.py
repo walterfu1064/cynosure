@@ -67,3 +67,20 @@ class PriorConfig:
         """Returns the per-coefficient RMS implied by this prior, given [N, 2] (n, m) indices"""
         n = nm_indices[:, 0]
         return self.base_rms / (n + 1.0) ** self.decay_order
+
+
+@dataclass(frozen=True, slots=True)
+class NoiseConfig:
+    """
+    Noise model to be applied to clean, simulated images.
+
+    To each z-stack will be added:
+    - a total signal photons sampled log-uniformly from [min_photons, max_photons]
+    - a flat background sampled uniformly from [0, max-background]
+    - Poisson shot noise based on the signal + background
+    - Gaussian read noise with rms `read_noise`
+    """
+    min_photons: float
+    max_photons: float
+    max_background: float
+    read_noise: float

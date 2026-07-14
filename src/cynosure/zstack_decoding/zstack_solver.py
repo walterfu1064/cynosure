@@ -5,6 +5,9 @@ aberrations from z-stacks.
 Training data is synthesized on the fly using Zernike coefficients sampled
 from a decaying-spectrum prior, and propagating forwards to get the synthetic images.
 
+If a `NoiseConfig` is given, photon and camera noise are added to the synthesized
+images before normalization (training/validation, not prediction).
+
 Aberration coefficients are scaled/unscaled before/after using to train,
 to keep them on an easy scale for the model to learn.
 
@@ -20,9 +23,10 @@ import torch
 import torch.nn.functional as F
 from torch.utils.data import DataLoader, TensorDataset
 
+from .noise_model import NoiseModel
 from .zstack_decoder import ZstackDecoder
 from ..beam_propagation import BeamPropagator
-from ..config import SimulationConfig, OpticalConfig, PriorConfig, ZernikeConfig
+from ..config import SimulationConfig, OpticalConfig, PriorConfig, ZernikeConfig, NoiseConfig
 from ..utilities.fft_utilities import convolve_psf_with_object
 from ..zernike import ZernikeProjector
 
@@ -48,20 +52,18 @@ class ZstackSolver(pl.LightningModule):
             amp_cfg: ZernikeConfig,
             phase_prior_cfg: PriorConfig,
             amp_prior_cfg: PriorConfig,
-
             z_objective: torch.Tensor,
             object_distribution: torch.Tensor,
+            noise_cfg: Optional[NoiseConfig] = None,
             *,
             learning_rate: float,
             weight_decay: float,
-
             hidden_channels: Sequence[int] = (16, 32, 64),
             embedding_dims: int = 256,
-
             batch_size: int = 32,
             generator_chunk: int = 4,
             steps_per_epoch: int = 200,
-            val_batches: int = 16,
+            val_batches: int = 32,
             val_seed: int = 42,
     ):
         super().__init__()
@@ -72,8 +74,10 @@ class ZstackSolver(pl.LightningModule):
         self.amp_cfg = amp_cfg
         self.phase_prior_cfg = phase_prior_cfg
         self.amp_prior_cfg = amp_prior_cfg
+        self.noise_cfg = noise_cfg
 
         self.propagator = BeamPropagator(sim_cfg, optics_cfg, phase_cfg, amp_cfg=amp_cfg)
+        self.noise_model = NoiseModel(noise_cfg) if noise_cfg is not None else None
         self.ftype = self.propagator.ftype
 
         self.register_buffer("z_objective", z_objective.to(self.ftype))
@@ -261,31 +265,45 @@ class ZstackSolver(pl.LightningModule):
         z = self.z_objective.unsqueeze(0).expand(batch_size, self.num_z)
         return self.propagator.defocus_from_objective_z(z)
 
+    def _apply_noise(
+            self,
+            images: torch.Tensor,
+            generator: Optional[torch.Generator] = None
+    ) -> torch.Tensor:
+        """Adds nosie to the image stack"""
+        if self.noise_model:
+            return self.noise_model(images, generator=generator)
+        return images
+
     def simulate_normalized_stacks(
             self,
             phase_coefs: torch.Tensor,
-            amp_coefs: torch.Tensor
+            amp_coefs: torch.Tensor,
+            with_noise: bool = False,
+            generator: Optional[torch.Generator] = None,
     ) -> torch.Tensor:
         """
         Forwards-simulates the normalized z-stacks at the model's own z positions
         from physical [B, N] coefficients (e.g. as returned by `predict_coefficients`).
+        If `with_noise`, adds noise before normalizing.
 
         Returns [B, num_z, H, W].
         """
         with torch.no_grad():
             z = self._batched_defocus(phase_coefs.shape[0])
             images = self._simulate_stacks(z, phase_coefs, amp_coefs)
+            if with_noise:
+                images = self._apply_noise(images, generator)
             return self.normalize_stack(images).float()
 
     def create_examples(
             self,
             batch_size: int,
-            *,
             generator: Optional[torch.Generator] = None,
     ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
         """
-        Samples a set of aberrations, forwards-simulates the z-stacks, and
-        normalizes them for use as inputs to the CNN.
+        Samples a set of aberrations, forwards-simulates the z-stacks, corrupts
+        them with the noise model, and normalizes them for use as inputs to the CNN.
 
         Returns:
         - images: [B, num_z, H, W] normalized z-stacks
@@ -293,7 +311,7 @@ class ZstackSolver(pl.LightningModule):
         - amp_coefs: [B, num_amp_coefs] amp aberration coefficients
         """
         phase_coefs, amp_coefs = self.generate_phase_amp_coefficients(batch_size, self.device, generator)
-        images = self.simulate_normalized_stacks(phase_coefs, amp_coefs)
+        images = self.simulate_normalized_stacks(phase_coefs, amp_coefs, with_noise=True, generator=generator)
         return images, phase_coefs, amp_coefs
 
     def _pacing_loader(self, num_batches: int) -> DataLoader:
