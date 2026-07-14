@@ -1,5 +1,5 @@
-from .submodules import build_encoder
+from .submodules import ZstackDecoder
 from .zstack_decoder import (
     make_object_distribution,
-    Zstack_Solver,
+    ZstackSolver,
 )

@@ -12,6 +12,7 @@ Validation patches are generated in the same way, but with a fixed seed so
 they're consistent across epochs.
 """
 
+from collections.abc import Sequence
 from typing import Optional
 
 import pytorch_lightning as pl
@@ -19,10 +20,11 @@ import torch
 import torch.nn.functional as F
 from torch.utils.data import DataLoader, TensorDataset
 
-from .submodules import build_encoder
+from .submodules import ZstackDecoder
 from ..beam_propagation import BeamPropagator
 from ..config import SimulationConfig, OpticalConfig, PriorConfig, ZernikeConfig
 from ..utilities.fft_utilities import convolve_psf_with_object
+from ..zernike import ZernikeProjector
 
 
 def make_object_distribution(
@@ -30,15 +32,14 @@ def make_object_distribution(
         object_pixel_size: float,
         bead_diameter: float,
 ) -> torch.Tensor:
-    x = torch.arange(-(object_grid_size//2), object_grid_size//2 + 1) * object_pixel_size
-    y = torch.arange(-(object_grid_size//2), object_grid_size//2 + 1) * object_pixel_size
-    Y, X = torch.meshgrid(y, x, indexing="ij")
+    coords = torch.arange(-(object_grid_size//2), object_grid_size//2 + 1) * object_pixel_size
+    Y, X = torch.meshgrid(coords, coords, indexing="ij")
     R = torch.sqrt(X*X + Y*Y)
     object_distrib = (R <= bead_diameter/2).float()
     return object_distrib
 
 
-class Zstack_Solver(pl.LightningModule):
+class ZstackSolver(pl.LightningModule):
     def __init__(
             self,
             sim_cfg: SimulationConfig,
@@ -50,9 +51,12 @@ class Zstack_Solver(pl.LightningModule):
 
             z_objective: torch.Tensor,
             object_distribution: torch.Tensor,
-
+            *,
             learning_rate: float,
             weight_decay: float,
+
+            hidden_channels: Sequence[int] = (16, 32, 64),
+            embedding_dims: int = 256,
 
             batch_size: int = 32,
             generator_chunk: int = 4,
@@ -75,13 +79,12 @@ class Zstack_Solver(pl.LightningModule):
         self.register_buffer("z_objective", z_objective.to(self.ftype))
         self.num_z = z_objective.shape[0]
 
-        self.encoder = build_encoder(
-            sim_cfg,
-            phase_cfg,
-            amp_cfg,
-            self.num_z,
-            [16, 32, 64],
-            256,
+        self.decoder = ZstackDecoder(
+            in_channels=self.num_z,
+            spatial_hidden_channels=hidden_channels,
+            embedding_dims=embedding_dims,
+            out_dims=self.num_phase_coefs + self.num_amp_coefs,
+            spatial_size=sim_cfg.object_grid_size,
         )
 
         self.register_buffer("object_distribution", object_distribution.to(self.ftype))
@@ -98,7 +101,7 @@ class Zstack_Solver(pl.LightningModule):
 
     def configure_optimizers(self):
         optimizer = torch.optim.AdamW(
-            self.encoder.parameters(),
+            self.decoder.parameters(),
             lr=self.learning_rate,
             weight_decay=self.weight_decay,
         )
@@ -110,6 +113,14 @@ class Zstack_Solver(pl.LightningModule):
             "lr_scheduler": {"scheduler": scheduler, "interval": "step"},
         }
 
+    def forward(self, images: torch.Tensor) -> torch.Tensor:
+        """Predicts whitened aberration coefficients from a [B, num_z, H, W] batch of normalized z-stacks"""
+        return self.decoder(images)
+
+    def predict_coefficients(self, images: torch.Tensor) -> tuple[torch.Tensor, torch.Tensor]:
+        """Predicts physical aberration coefficients from a [B, num_z, H, W] batch of normalized z-stacks"""
+        return self.unwhiten_predictions(self.forward(images))
+
     @property
     def num_phase_coefs(self) -> int:
         """Convenience pass-through"""
@@ -120,13 +131,7 @@ class Zstack_Solver(pl.LightningModule):
         """Convenience pass-through"""
         return self.propagator.num_amp_coefs
 
-    #%% Coefficient whitening
-
-    @staticmethod
-    def _get_coef_scales(nm_indices: torch.Tensor, noise_cfg: PriorConfig) -> torch.Tensor:
-        """Returns the per-coefficient rms implied by the given prior"""
-        n = nm_indices[:, 0]
-        return noise_cfg.base_rms / torch.pow(n + 1, noise_cfg.decay_order)
+    # Coefficient whitening
 
     def _setup_whitening(self) -> None:
         """
@@ -143,35 +148,31 @@ class Zstack_Solver(pl.LightningModule):
         phase_nm = self.propagator.phase_projector.nm_indices
         is_phase_piston = (phase_nm == 0).all(dim=1)
         phase_means = torch.zeros(self.num_phase_coefs, dtype=self.ftype)
-        phase_scales = self._get_coef_scales(phase_nm, self.phase_prior_cfg).to(self.ftype)
+        phase_scales = self.phase_prior_cfg.coef_scales(phase_nm).to(self.ftype)
 
         amp_nm = self.propagator.amp_projector.nm_indices
         is_amp_piston = (amp_nm == 0).all(dim=1)
-        amp_means = torch.where(is_amp_piston, 1, 0).to(self.ftype)
-        amp_scales = self._get_coef_scales(amp_nm, self.amp_prior_cfg).to(self.ftype)
+        amp_means = is_amp_piston.to(self.ftype)
+        amp_scales = self.amp_prior_cfg.coef_scales(amp_nm).to(self.ftype)
 
-        target_means = torch.cat([phase_means, amp_means], dim=0)
-        self.register_buffer("target_means", target_means)
-
-        target_scales = torch.cat([phase_scales, amp_scales], dim=0)
-        self.register_buffer("target_scales", target_scales)
-
+        self.register_buffer("target_means", torch.cat([phase_means, amp_means], dim=0))
+        self.register_buffer("target_scales", torch.cat([phase_scales, amp_scales], dim=0))
         self.register_buffer("is_phase_piston", is_phase_piston)
         self.register_buffer("is_amp_piston", is_amp_piston)
 
     def whiten_targets(self, phase_coefs: torch.Tensor, amp_coefs: torch.Tensor) -> torch.Tensor:
         """Whitens the [B, N] labels and cats them into a [B, N_tot] regression target"""
         coefs = torch.cat([phase_coefs, amp_coefs], dim=1)
-        return (coefs - self.target_means) / self.target_scales
+        return ((coefs - self.target_means) / self.target_scales).float()
 
-    def unwhiten_targets(self, predictions: torch.Tensor) -> tuple[torch.Tensor, torch.Tensor]:
+    def unwhiten_predictions(self, predictions: torch.Tensor) -> tuple[torch.Tensor, torch.Tensor]:
         """Splits whitened [B, N_tot] predictions back into physical (phase, amp) coefs"""
         coefs = predictions * self.target_scales + self.target_means
         phase_coefs = coefs[:, :self.num_phase_coefs]
         amp_coefs = coefs[:, self.num_phase_coefs:]
         return phase_coefs, amp_coefs
 
-    #%% Synthetic data generation
+    # Synthetic data generation
 
     @staticmethod
     def normalize_stack(images: torch.Tensor) -> torch.Tensor:
@@ -180,21 +181,24 @@ class Zstack_Solver(pl.LightningModule):
         sums = images.sum((-2, -1), keepdim=True)
         return images / sums
 
-    @staticmethod
-    def sample_coefficients(
-            nm_indices: torch.Tensor,
+    def _sample_pinned_coefficients(
+            self,
+            projector: ZernikeProjector,
             prior_cfg: PriorConfig,
+            piston_mask: torch.Tensor,
+            piston_value: float,
             batch_size: int,
-            *,
+            device: torch.device,
             generator: Optional[torch.Generator] = None,
-            dtype: Optional[torch.dtype] = None,
-            device: Optional[torch.device] = None,
     ) -> torch.Tensor:
-        """Samples zero-mean coefficients with RMS that decays with raidal order `n`"""
-        coefs = torch.randn(batch_size, nm_indices.shape[0], generator=generator, dtype=dtype, device=device)
-        n = nm_indices[:, 0].to(coefs.device)
-        coefs = coefs * prior_cfg.base_rms / torch.pow(n + 1, prior_cfg.decay_order)
-        return coefs
+        """
+        Samples [B, N] coefficients with RMS that decays with radial order `n`,
+        pinning the piston term to `piston_value`.
+        """
+        nm_indices = projector.nm_indices
+        coefs = torch.randn(batch_size, nm_indices.shape[0], generator=generator, dtype=self.ftype, device=device)
+        coefs = coefs * prior_cfg.coef_scales(nm_indices).to(device)
+        return torch.where(piston_mask, piston_value, coefs)
 
     def generate_phase_amp_coefficients(
             self,
@@ -209,34 +213,55 @@ class Zstack_Solver(pl.LightningModule):
         Outputs are [B, num_phase] and [B, num_amp].
         """
 
-        phase_coefs = self.sample_coefficients(
-            self.propagator.phase_projector.nm_indices,
+        phase_coefs = self._sample_pinned_coefficients(
+            self.propagator.phase_projector,
             self.phase_prior_cfg,
-            batch_size,
-            generator=generator,
-            dtype=self.ftype,
+            self.is_phase_piston,
+            piston_value=0,  # pin global phase
+            batch_size=batch_size,
             device=device,
+            generator=generator,
         )
-        phase_coefs = torch.where(self.is_phase_piston, 0, phase_coefs)  # pin global phase
-
-        amp_coefs = self.sample_coefficients(
-            self.propagator.amp_projector.nm_indices,
+        amp_coefs = self._sample_pinned_coefficients(
+            self.propagator.amp_projector,
             self.amp_prior_cfg,
-            batch_size,
-            generator=generator,
-            dtype=self.ftype,
+            self.is_amp_piston,
+            piston_value=1,  # pin overall intensity (will be normalized)
+            batch_size=batch_size,
             device=device,
+            generator=generator,
         )
-        amp_coefs = torch.where(self.is_amp_piston, 1, amp_coefs)  # pin overall intensity (will be normalized)
-
         return phase_coefs, amp_coefs
+
+    def _simulate_stacks(
+            self,
+            z: torch.Tensor,
+            phase_coefs: torch.Tensor,
+            amp_coefs: torch.Tensor,
+    ) -> torch.Tensor:
+        """
+        Forwards-simulates [B, num_z, H, W] z-stacks from [B, num_z] defocus values
+        and [B, N] aberration coefficients. Propagation happens in chunks to bound memory use.
+        """
+        batch_size = z.shape[0]
+        chunk_size = self.generator_chunk or batch_size
+        image_chunks = []
+        for start in range(0, batch_size, chunk_size):
+            stop = min(start + chunk_size, batch_size)
+            z_chunk = z[start:stop].reshape(-1)
+            phase_chunk = phase_coefs[start:stop].repeat_interleave(self.num_z, dim=0)
+            amp_chunk = amp_coefs[start:stop].repeat_interleave(self.num_z, dim=0)
+            psf = self.propagator(z_chunk, phase_chunk, amp_chunk)
+            img = convolve_psf_with_object(self.object_distribution, psf)
+            image_chunks.append(img.reshape(stop - start, self.num_z, *img.shape[-2:]))
+        return torch.cat(image_chunks)
 
     def create_examples(
             self,
             batch_size: int,
             *,
             generator: Optional[torch.Generator] = None,
-    ) -> tuple[torch.Tensor, torch.Tensor, Optional[torch.Tensor]]:
+    ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
         """
         Samples a set of aberrations, forwards-simulates the z-stacks, and
         normalizes them for use as inputs to the CNN.
@@ -247,40 +272,26 @@ class Zstack_Solver(pl.LightningModule):
         - amp_coefs: [B, num_amp_coefs] amp aberration coefficients
         """
 
-        num_z = self.num_z
-        device = self.z_objective.device  # TODO - make this cleaner
-
         with torch.no_grad():
-            z = self.z_objective.unsqueeze(0).expand(batch_size, num_z)
+            z = self.z_objective.unsqueeze(0).expand(batch_size, self.num_z)
             z = self.propagator.defocus_from_objective_z(z)
-            phase_coefs, amp_coefs = self.generate_phase_amp_coefficients(batch_size, device, generator)
-
-            # Propagation in chunks to bound memory use
-            chunk_size = self.generator_chunk or batch_size
-            image_chunks = []
-            for start in range(0, batch_size, chunk_size):
-                stop = min(start + chunk_size, batch_size)
-                z_chunk = z[start:stop].reshape(-1)
-                phase_chunk = phase_coefs[start:stop].repeat_interleave(self.num_z, dim=0)
-                amp_chunk = amp_coefs[start:stop].repeat_interleave(self.num_z, dim=0)
-                psf = self.propagator(z_chunk, phase_chunk, amp_chunk)
-                img = convolve_psf_with_object(self.object_distribution, psf)
-                img = img.reshape(stop - start, self.num_z, *img.shape[-2:])
-                image_chunks.append(img)
-            images = torch.cat(image_chunks)
+            phase_coefs, amp_coefs = self.generate_phase_amp_coefficients(batch_size, self.device, generator)
+            images = self._simulate_stacks(z, phase_coefs, amp_coefs)
             images = self.normalize_stack(images).float()
 
         return images, phase_coefs, amp_coefs
 
+    def _pacing_loader(self, num_batches: int) -> DataLoader:
+        """Placeholder loader used only to pace the loop (actual batches are synthesized inside the steps)"""
+        return DataLoader(TensorDataset(torch.arange(num_batches)), batch_size=1)
+
     def train_dataloader(self) -> DataLoader:
-        """Helper method used only to pace the loop (actual batches are synthesized inside training_step)"""
-        return DataLoader(TensorDataset(torch.arange(self.steps_per_epoch)), batch_size=1)
+        return self._pacing_loader(self.steps_per_epoch)
 
     def val_dataloader(self) -> DataLoader:
-        """Helper method used only to pace the loop (actual batches are synthesized inside validation_step)"""
-        return DataLoader(TensorDataset(torch.arange(self.val_batches)), batch_size=1)
+        return self._pacing_loader(self.val_batches)
 
-    #%% PTL training methods
+    # PTL training methods
 
     def _forwards_common(
             self,
@@ -288,7 +299,7 @@ class Zstack_Solver(pl.LightningModule):
     ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
         images, phase_coefs, amp_coefs = self.create_examples(self.batch_size, generator=generator)
         targets = self.whiten_targets(phase_coefs, amp_coefs)
-        predictions = self.encoder(images)
+        predictions = self.forward(images)
         loss = F.mse_loss(predictions, targets)
         return loss, predictions, targets
 

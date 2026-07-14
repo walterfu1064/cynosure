@@ -62,3 +62,8 @@ class PriorConfig:
     """
     base_rms: float
     decay_order: int
+
+    def coef_scales(self, nm_indices: torch.Tensor) -> torch.Tensor:
+        """Returns the per-coefficient RMS implied by this prior, given [N, 2] (n, m) indices"""
+        n = nm_indices[:, 0]
+        return self.base_rms / (n + 1.0) ** self.decay_order

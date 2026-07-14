@@ -1,10 +1,10 @@
 import math
+from collections.abc import Sequence
+from itertools import pairwise
 from typing import Literal, Optional
 
 import torch
 import torch.nn as nn
-
-from ..config import SimulationConfig, ZernikeConfig
 
 
 def conv_norm_act(
@@ -24,28 +24,27 @@ def conv_norm_act(
     )
 
 
-class CNN_Encoder(nn.Module):
+class ZstackDecoder(nn.Module):
     """
-    Strided CNN followed by flattening to a FFN, for encoding a z-stack of images.
+    Strided CNN followed by flattening to a FFN, for decoding aberration
+    coefficients from a z-stack of images.
 
     [B, Cin, H, W] -> [B, D, Hout, Wout] -> [B, E*Hout*Wout] -> [B, Cout]
     """
     def __init__(
             self,
             in_channels: int,
-            spatial_hidden_channels: list[int],
+            spatial_hidden_channels: Sequence[int],
             embedding_dims: int,
             out_dims: int,
             spatial_size: int,
     ):
         super().__init__()
 
-        assert isinstance(spatial_hidden_channels, list)
         assert len(spatial_hidden_channels) >= 1
 
         cnn = []
-        full_spatial_channels = [in_channels] + spatial_hidden_channels
-        for in_ch, out_ch in zip(full_spatial_channels[:-1], full_spatial_channels[1:]):
+        for in_ch, out_ch in pairwise([in_channels, *spatial_hidden_channels]):
             cnn.append(conv_norm_act(in_ch, out_ch, 3))
             cnn.append(conv_norm_act(out_ch, out_ch, 3, stride=2))
         self.cnn = nn.Sequential(*cnn)
@@ -54,31 +53,12 @@ class CNN_Encoder(nn.Module):
         downsampled_size = int(math.ceil(spatial_size / (2 ** num_downsamplings)))
         flat_dim = spatial_hidden_channels[-1] * downsampled_size**2
 
-        self.ffn = nn.Sequential(*[
+        self.ffn = nn.Sequential(
             nn.Flatten(1, -1),
             nn.Linear(flat_dim, embedding_dims),
             nn.GELU(),
             nn.Linear(embedding_dims, out_dims),
-        ])
+        )
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
         return self.ffn(self.cnn(x))
-
-
-def build_encoder(
-        sim_cfg: SimulationConfig,
-        phase_cfg: ZernikeConfig,
-        amp_cfg: ZernikeConfig,
-        num_z: int,
-        hidden_channels: list[int],
-        embedding_dims: int,
-) -> nn.Module:
-    model = CNN_Encoder(
-        in_channels=num_z,
-        spatial_hidden_channels=hidden_channels,
-        embedding_dims=embedding_dims,
-        out_dims=phase_cfg.num_elements+amp_cfg.num_elements,
-        spatial_size=sim_cfg.object_grid_size
-    )
-    return model
-
