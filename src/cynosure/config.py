@@ -51,3 +51,14 @@ class ZernikeConfig:
             if not allowed or (n, m) in allowed
         )
         object.__setattr__(self, "num_elements", count)
+
+
+@dataclass(frozen=True, slots=True)
+class PriorConfig:
+    """
+    Defines statistics for a prior distribution over Zernike coefficients.
+    Takes each coefficient to be Gaussian, with RMS decaying with radial
+    order `n` as `rms = base_rms / (n+1)^decay_order`.
+    """
+    base_rms: float
+    decay_order: int
