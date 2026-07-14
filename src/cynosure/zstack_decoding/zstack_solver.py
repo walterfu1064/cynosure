@@ -233,7 +233,7 @@ class ZstackSolver(pl.LightningModule):
         )
         return phase_coefs, amp_coefs
 
-    def simulate_stacks(
+    def _simulate_stacks(
             self,
             z: torch.Tensor,
             phase_coefs: torch.Tensor,
@@ -256,6 +256,27 @@ class ZstackSolver(pl.LightningModule):
             image_chunks.append(img.reshape(stop - start, self.num_z, *img.shape[-2:]))
         return torch.cat(image_chunks)
 
+    def _batched_defocus(self, batch_size: int) -> torch.Tensor:
+        """Returns the [B, num_z] in-medium defocus corresponding to the stored z positions"""
+        z = self.z_objective.unsqueeze(0).expand(batch_size, self.num_z)
+        return self.propagator.defocus_from_objective_z(z)
+
+    def simulate_normalized_stacks(
+            self,
+            phase_coefs: torch.Tensor,
+            amp_coefs: torch.Tensor
+    ) -> torch.Tensor:
+        """
+        Forwards-simulates the normalized z-stacks at the model's own z positions
+        from physical [B, N] coefficients (e.g. as returned by `predict_coefficients`).
+
+        Returns [B, num_z, H, W].
+        """
+        with torch.no_grad():
+            z = self._batched_defocus(phase_coefs.shape[0])
+            images = self._simulate_stacks(z, phase_coefs, amp_coefs)
+            return self.normalize_stack(images).float()
+
     def create_examples(
             self,
             batch_size: int,
@@ -271,14 +292,8 @@ class ZstackSolver(pl.LightningModule):
         - phase_coefs: [B, num_phase_coefs] phase aberratoin coefficients
         - amp_coefs: [B, num_amp_coefs] amp aberration coefficients
         """
-
-        with torch.no_grad():
-            z = self.z_objective.unsqueeze(0).expand(batch_size, self.num_z)
-            z = self.propagator.defocus_from_objective_z(z)
-            phase_coefs, amp_coefs = self.generate_phase_amp_coefficients(batch_size, self.device, generator)
-            images = self.simulate_stacks(z, phase_coefs, amp_coefs)
-            images = self.normalize_stack(images).float()
-
+        phase_coefs, amp_coefs = self.generate_phase_amp_coefficients(batch_size, self.device, generator)
+        images = self.simulate_normalized_stacks(phase_coefs, amp_coefs)
         return images, phase_coefs, amp_coefs
 
     def _pacing_loader(self, num_batches: int) -> DataLoader:
