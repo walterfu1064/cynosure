@@ -486,7 +486,10 @@ class ZstackSolver_Covariance(ZstackSolver):
             hidden_channels: Sequence[int],
             embedding_dims: int,
     ) -> nn.Module:
-        """Sets up a decoder with an extra, detached output head for the Cholensky factor"""
+        """
+        Sets up a decoder with an extra, detached output head for the Cholensky factor.
+        Initializes with no covariance (Cholensky = identity matrix).
+        """
         decoder = ZstackDecoder_DetachedHead(
             in_channels=self.num_z,
             spatial_hidden_channels=hidden_channels,
@@ -495,6 +498,13 @@ class ZstackSolver_Covariance(ZstackSolver):
             detached_out_dims=self.tril_indices.shape[1],
             spatial_size=self.sim_cfg.object_grid_size,
         )
+
+        inverse_softplus_one = math.log(math.expm1(1.0))  # so softplus of diagonal = 1
+        nn.init.zeros_(decoder.detached_head.weight)
+        with torch.no_grad():
+            decoder.detached_head.bias.copy_(
+                torch.where(self.tril_is_diagonal, inverse_softplus_one, 0.0)
+            )
         return decoder
 
     def predicted_means(self, predictions: torch.Tensor) -> torch.Tensor:
