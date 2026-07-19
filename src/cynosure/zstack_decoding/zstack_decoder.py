@@ -53,12 +53,47 @@ class ZstackDecoder(nn.Module):
         downsampled_size = int(math.ceil(spatial_size / (2 ** num_downsamplings)))
         flat_dim = spatial_hidden_channels[-1] * downsampled_size**2
 
-        self.ffn = nn.Sequential(
+        self.embed = nn.Sequential(
             nn.Flatten(1, -1),
             nn.Linear(flat_dim, embedding_dims),
             nn.GELU(),
-            nn.Linear(embedding_dims, out_dims),
         )
 
+        self.project = nn.Linear(embedding_dims, out_dims)
+
     def forward(self, x: torch.Tensor) -> torch.Tensor:
-        return self.ffn(self.cnn(x))
+        return self.project(self.embed(self.cnn(x)))
+
+
+class ZstackDecoder_DetachedHead(ZstackDecoder):
+    """
+    Extends ZstackDecoder with a second head from a detached copy of the embedding.
+
+    Allows aux outputs (e.g., uncertainty params) to train without mucking up the
+    main outputs in the shared trunk.
+
+    The aux outputs are appended to the main ones along the channel dim before outputting
+    """
+    def __init__(
+            self,
+            in_channels: int,
+            spatial_hidden_channels: Sequence[int],
+            embedding_dims: int,
+            out_dims: int,
+            detached_out_dims: int,
+            spatial_size: int,
+    ):
+        super().__init__(
+            in_channels=in_channels,
+            spatial_hidden_channels=spatial_hidden_channels,
+            embedding_dims=embedding_dims,
+            out_dims=out_dims,
+            spatial_size=spatial_size,
+        )
+        self.detached_head = nn.Linear(embedding_dims, detached_out_dims)
+
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        emb = self.embed(self.cnn(x))
+        main_outputs = self.project(emb)
+        detached_outputs = self.detached_head(emb.detach())
+        return torch.cat([main_outputs, detached_outputs], dim=1)

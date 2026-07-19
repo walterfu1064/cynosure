@@ -15,6 +15,7 @@ Validation patches are generated in the same way, but with a fixed seed so
 they're consistent across epochs.
 """
 
+import math
 from collections.abc import Sequence
 from typing import Optional
 
@@ -25,7 +26,7 @@ import torch.nn.functional as F
 from torch.utils.data import DataLoader, TensorDataset
 
 from .noise_model import NoiseModel
-from .zstack_decoder import ZstackDecoder
+from .zstack_decoder import ZstackDecoder, ZstackDecoder_DetachedHead
 from ..beam_propagation import BeamPropagator
 from ..config import SimulationConfig, OpticalConfig, PriorConfig, ZernikeConfig, NoiseConfig
 from ..utilities.fft_utilities import convolve_psf_with_object
@@ -89,6 +90,7 @@ class ZstackSolver(pl.LightningModule):
         self.register_buffer("z_objective", z_objective.to(self.ftype))
         self.num_z = z_objective.shape[0]
 
+        self._setup_whitening()  # must be initialized before decoder
         self.decoder = self._setup_decoder(hidden_channels, embedding_dims)
 
         self.register_buffer("object_distribution", object_distribution.to(self.ftype))
@@ -101,8 +103,6 @@ class ZstackSolver(pl.LightningModule):
         self.val_batches = val_batches
         self.val_seed = val_seed
 
-        self._setup_whitening()
-
     @property
     def decoder_out_dims(self) -> int:
         """Number of decoder output dims, may be overridden by child classes that predict additional parameters"""
@@ -113,6 +113,8 @@ class ZstackSolver(pl.LightningModule):
             hidden_channels: Sequence[int],
             embedding_dims: int,
     ) -> nn.Module:
+        if not hasattr(self, "decoder_out_dims"):
+            raise RuntimeError("`decoder_out_dims` is uninitialized, call `_setup_whitening` first")
         decoder = ZstackDecoder(
             in_channels=self.num_z,
             spatial_hidden_channels=hidden_channels,
@@ -401,7 +403,6 @@ class ZstackSolver(pl.LightningModule):
         return loss
 
 
-
 class ZstackSolver_Heteroscedastic(ZstackSolver):
     """
     Extends ZstackSolver, training a decoder to predict not only the most likely
@@ -449,4 +450,100 @@ class ZstackSolver_Heteroscedastic(ZstackSolver):
         return torch.distributions.Normal(
             dist.mean * self.target_scales + self.target_means,
             dist.stddev * self.target_scales,
+        )
+
+
+class ZstackSolver_Covariance(ZstackSolver):
+    """
+    Extends ZstackSolver, training a decoder to predict not only the most likely
+    aberration coefficients, but also their full covariance matrix.
+
+    Handles correlations (at least, pairwise ones), but still not multimodality.
+
+    The covariance matrix is represented by its Cholensky factor, a flattened
+    version of which is predicted by the extra decoder head.
+    """
+    def _setup_whitening(self) -> None:
+        """Also sets up index bookkeeping for the flattened Cholesky factor"""
+        super()._setup_whitening()
+        num_kept = int((~self.is_piston).sum())
+        tril_indices = torch.tril_indices(num_kept, num_kept)
+        self.register_buffer("tril_indices", tril_indices)
+        self.register_buffer("tril_is_diagonal", tril_indices[0] == tril_indices[1])
+
+    @property
+    def num_kept_coefs(self) -> int:
+        """Number of non-piston coefficients jointly modeled by the Gaussian"""
+        return int((~self.is_piston).sum())
+
+    @property
+    def decoder_out_dims(self) -> int:
+        """mu for every coefficient, plus the flattened Cholesky factor over the non-piston ones"""
+        return (self.num_phase_coefs + self.num_amp_coefs) + self.tril_indices.shape[1]
+
+    def _setup_decoder(
+            self,
+            hidden_channels: Sequence[int],
+            embedding_dims: int,
+    ) -> nn.Module:
+        """Sets up a decoder with an extra, detached output head for the Cholensky factor"""
+        decoder = ZstackDecoder_DetachedHead(
+            in_channels=self.num_z,
+            spatial_hidden_channels=hidden_channels,
+            embedding_dims=embedding_dims,
+            out_dims=self.num_phase_coefs + self.num_amp_coefs,
+            detached_out_dims=self.tril_indices.shape[1],
+            spatial_size=self.sim_cfg.object_grid_size,
+        )
+        return decoder
+
+    def predicted_means(self, predictions: torch.Tensor) -> torch.Tensor:
+        return predictions[:, :self.num_phase_coefs + self.num_amp_coefs]
+
+    def _to_scale_tril(self, chol_entries: torch.Tensor) -> torch.Tensor:
+        """
+        Converts the flattened [B, K] Cholensky factors to lower-triangular [B, N_kept, N_kept].
+        Also applies softplus to the diagonal, to keep the Cholensky decomposition unique.
+        """
+        chol_entries = torch.where(self.tril_is_diagonal, F.softplus(chol_entries) + 1e-6, chol_entries)
+        scale_tril = chol_entries.new_zeros(chol_entries.shape[0], self.num_kept_coefs, self.num_kept_coefs)
+        scale_tril[:, self.tril_indices[0], self.tril_indices[1]] = chol_entries
+        return scale_tril
+
+    def _whitened_normal(self, predictions: torch.Tensor) -> torch.distributions.MultivariateNormal:
+        """Reads the raw decoder output as a joint Gaussian in whitened space"""
+        means = self.predicted_means(predictions)[:, ~self.is_piston]
+        scale_tril = self._to_scale_tril(predictions[:, self.num_phase_coefs + self.num_amp_coefs:])
+        return torch.distributions.MultivariateNormal(means, scale_tril=scale_tril)
+
+    def compute_losses(
+            self,
+            predictions: torch.Tensor,
+            targets: torch.Tensor,
+    ) -> tuple[torch.Tensor, dict]:
+        dist = self._whitened_normal(predictions)
+        targets_kept = targets[:, ~self.is_piston]
+        mu_loss = F.mse_loss(dist.mean, targets_kept)
+        detached_dist = torch.distributions.MultivariateNormal(
+            dist.mean.detach(), scale_tril=dist.scale_tril
+        )  # detach the mean so the covariance head can't push it back to the uninformative priors
+        sigma_loss = -detached_dist.log_prob(targets_kept).mean() / self.num_kept_coefs  # per-coefficient scale
+        return mu_loss + sigma_loss, {"mu_mse": mu_loss, "sigma_nll": sigma_loss}
+
+    def val_metrics(self, predictions: torch.Tensor, targets: torch.Tensor) -> dict:
+        metrics = super().val_metrics(predictions, targets)
+        dist = self._whitened_normal(predictions)
+        residuals = (targets[:, ~self.is_piston] - dist.mean).unsqueeze(-1)
+        z_scores = torch.linalg.solve_triangular(dist.scale_tril, residuals, upper=False)
+        metrics["z_std"] = z_scores.std()  # ~1 when the covariances are calibrated
+        return metrics
+
+    def predict_distribution(self, images: torch.Tensor) -> torch.distributions.MultivariateNormal:
+        """Predicts the physical-space joint coefficient distributions (excluding the pinned piston coefs)"""
+        dist = self._whitened_normal(self.forward(images))
+        scales = self.target_scales[~self.is_piston]
+        means = self.target_means[~self.is_piston]
+        return torch.distributions.MultivariateNormal(
+            dist.mean * scales + means,
+            scale_tril=scales.unsqueeze(-1) * dist.scale_tril,
         )
