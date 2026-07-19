@@ -20,6 +20,7 @@ from typing import Optional
 
 import pytorch_lightning as pl
 import torch
+import torch.nn as nn
 import torch.nn.functional as F
 from torch.utils.data import DataLoader, TensorDataset
 
@@ -44,6 +45,11 @@ def make_object_distribution(
 
 
 class ZstackSolver(pl.LightningModule):
+    """
+    Module that contains an imaging system configuration and a z-stack decoder.
+    Using its own generated synthetic data, tarins its decoder to predict
+    the most likely set of aberration coefficients from a given z-stack.
+    """
     def __init__(
             self,
             *,
@@ -83,13 +89,7 @@ class ZstackSolver(pl.LightningModule):
         self.register_buffer("z_objective", z_objective.to(self.ftype))
         self.num_z = z_objective.shape[0]
 
-        self.decoder = ZstackDecoder(
-            in_channels=self.num_z,
-            spatial_hidden_channels=hidden_channels,
-            embedding_dims=embedding_dims,
-            out_dims=self.num_phase_coefs + self.num_amp_coefs,
-            spatial_size=sim_cfg.object_grid_size,
-        )
+        self.decoder = self._setup_decoder(hidden_channels, embedding_dims)
 
         self.register_buffer("object_distribution", object_distribution.to(self.ftype))
         self.learning_rate = learning_rate
@@ -102,6 +102,20 @@ class ZstackSolver(pl.LightningModule):
         self.val_seed = val_seed
 
         self._setup_whitening()
+
+    def _setup_decoder(
+            self,
+            hidden_channels: Sequence[int],
+            embedding_dims: int,
+    ) -> nn.Module:
+        decoder = ZstackDecoder(
+            in_channels=self.num_z,
+            spatial_hidden_channels=hidden_channels,
+            embedding_dims=embedding_dims,
+            out_dims=self.num_phase_coefs + self.num_amp_coefs,
+            spatial_size=self.sim_cfg.object_grid_size,
+        )
+        return decoder
 
     def configure_optimizers(self):
         optimizer = torch.optim.AdamW(
@@ -163,6 +177,7 @@ class ZstackSolver(pl.LightningModule):
         self.register_buffer("target_scales", torch.cat([phase_scales, amp_scales], dim=0))
         self.register_buffer("is_phase_piston", is_phase_piston)
         self.register_buffer("is_amp_piston", is_amp_piston)
+        self.register_buffer("is_piston", torch.cat([self.is_phase_piston, self.is_amp_piston], dim=0))
 
     def whiten_targets(self, phase_coefs: torch.Tensor, amp_coefs: torch.Tensor) -> torch.Tensor:
         """Whitens the [B, N] labels and cats them into a [B, N_tot] regression target"""
@@ -348,5 +363,95 @@ class ZstackSolver(pl.LightningModule):
         num_phase = self.num_phase_coefs
         self.log("val/loss", loss, prog_bar=True, batch_size=self.batch_size)
         amp_rmse = F.mse_loss(predictions[:, num_phase:], targets[:, num_phase:]).sqrt()
+        self.log("val/amp_rmse_whitened", amp_rmse, batch_size=self.batch_size)
+        return loss
+
+
+
+class ZstackSolver_Heteroscedastic(ZstackSolver):
+    """
+    Extends ZstackSolver, training a decoder to predict not only the most likely
+    aberration coefficients, but also their individual uncertainties.
+    Each coefficient is modeled as its own Gaussian distribution, so correlations
+    and multimodality are still not handled. Maybe someday!
+    """
+    def _setup_decoder(
+            self,
+            hidden_channels: Sequence[int],
+            embedding_dims: int,
+    ) -> nn.Module:
+        """Twice the number of output dims, so both mu and log(sigma) get decoded"""
+        decoder = ZstackDecoder(
+            in_channels=self.num_z,
+            spatial_hidden_channels=hidden_channels,
+            embedding_dims=embedding_dims,
+            out_dims=2*(self.num_phase_coefs + self.num_amp_coefs),
+            spatial_size=self.sim_cfg.object_grid_size,
+        )
+        return decoder
+
+    def unwhiten_predictions(
+            self,
+            predictions: torch.Tensor
+    ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
+        """Splits whitened [B, N_tot] predictions back into physical (phase, amp) coefs"""
+        mu_predictions = predictions[:, :self.num_phase_coefs+self.num_amp_coefs]
+        logsigma_predictions = predictions[:, self.num_phase_coefs+self.num_amp_coefs:]
+        var_predictions = (2 * logsigma_predictions).exp()
+
+        mu_coefs = mu_predictions * self.target_scales + self.target_means
+        mu_phase_coefs = mu_coefs[:, :self.num_phase_coefs]
+        mu_amp_coefs = mu_coefs[:, self.num_phase_coefs:]
+
+        var_coefs = var_predictions * self.target_scales.square()
+        var_phase_coefs = var_coefs[:, :self.num_phase_coefs]
+        var_amp_coefs = var_coefs[:, self.num_phase_coefs:]
+        return mu_phase_coefs, mu_amp_coefs, var_phase_coefs, var_amp_coefs
+
+    def _forwards_common(
+            self,
+            generator: Optional[torch.Generator] = None
+    ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
+        images, phase_coefs, amp_coefs = self.create_examples(self.batch_size, generator=generator)
+        targets = self.whiten_targets(phase_coefs, amp_coefs)
+        predictions = self.forward(images)  # [B, 2*(num_phase + num_amp)]
+
+        mu_predictions = predictions[:, :self.num_phase_coefs+self.num_amp_coefs]
+        logsigma_predictions = predictions[:, self.num_phase_coefs+self.num_amp_coefs:]
+        var_predictions = (2 * logsigma_predictions).exp()
+
+        keep = ~self.is_piston  # mask piston terms out of the losses
+        mu_loss = F.mse_loss(mu_predictions[:, keep], targets[:, keep])
+        sigma_loss = F.gaussian_nll_loss(
+            mu_predictions.detach()[:, keep],
+            targets[:, keep],
+            var_predictions[:, keep]
+        )  # detach means so sigmas don't push means back to the uninformative priors
+
+        return mu_loss, sigma_loss, mu_predictions, var_predictions, targets
+
+    def training_step(self, batch: torch.Tensor, batch_idx: int) -> torch.Tensor:
+        mu_loss, sigma_loss, _, _, _ = self._forwards_common()
+        loss = mu_loss + sigma_loss
+        self.log("train/loss", loss, prog_bar=True, batch_size=self.batch_size)
+        self.log("train/mu_mse", mu_loss, batch_size=self.batch_size)
+        self.log("train/sigma_nll", sigma_loss, batch_size=self.batch_size)
+        return loss
+
+    def validation_step(self, batch: torch.Tensor, batch_idx: int) -> torch.Tensor:
+        generator = torch.Generator(device=self.device).manual_seed(self.val_seed + batch_idx)
+        mu_loss, sigma_loss, mu, var, targets = self._forwards_common(generator=generator)
+        loss = mu_loss + sigma_loss
+
+        num_phase = self.num_phase_coefs
+        self.log("val/loss", loss, prog_bar=True, batch_size=self.batch_size)
+        self.log("val/mu_mse", mu_loss, batch_size=self.batch_size)
+        self.log("val/sigma_nll", sigma_loss, batch_size=self.batch_size)
+
+        keep = ~self.is_piston
+        z_scores = (mu - targets)[:, keep] / var[:, keep].sqrt()
+        self.log("val/z_std", z_scores.std(), batch_size=self.batch_size)  # ~1 when the sigmas are calibrated
+
+        amp_rmse = F.mse_loss(mu[:, num_phase:], targets[:, num_phase:]).sqrt()
         self.log("val/amp_rmse_whitened", amp_rmse, batch_size=self.batch_size)
         return loss
