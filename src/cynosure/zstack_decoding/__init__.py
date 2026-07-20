@@ -5,4 +5,5 @@ from .zstack_solver import (
     ZstackSolver,
     ZstackSolver_Heteroscedastic,
     ZstackSolver_Covariance,
+    ZstackSolver_MixedDensity,
 )

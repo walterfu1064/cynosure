@@ -595,6 +595,7 @@ class ZstackSolver_MixedDensity(ZstackSolver):
             val_batches: int = 32,
             val_seed: int = 42,
     ):
+        self.num_components = num_components  # must come before decoder init
         super().__init__(
             sim_cfg=sim_cfg,
             optics_cfg=optics_cfg,
@@ -615,7 +616,6 @@ class ZstackSolver_MixedDensity(ZstackSolver):
             val_batches=val_batches,
             val_seed=val_seed,
         )
-        self.num_components = num_components
 
     def _setup_whitening(self) -> None:
         """Also sets up index bookkeeping for the flattened Cholesky factors"""
@@ -635,8 +635,7 @@ class ZstackSolver_MixedDensity(ZstackSolver):
             embedding_dims: int,
     ) -> nn.Module:
         """
-        Sets up a decoder with an extra, detached output head for the Cholensky
-        facotrs and the mixing logits.
+        Sets up a decoder with an extra, detached output head for the Cholensky factors and the mixing logits.
         Initializes with no covariance (Cholensky = identity matrix).
         """
         num_chol = self.num_components * self.tril_indices.shape[1]
@@ -713,7 +712,7 @@ class ZstackSolver_MixedDensity(ZstackSolver):
 
         with torch.no_grad():  # allocations to components under current mixture, Prob(component | target)
             log_joint = mixture.mixture_distribution.logits + dist.log_prob(targets_kept.unsqueeze(1))
-            allocations = log_joint.softmax(dim=1)  #
+            allocations = log_joint.softmax(dim=1)
 
         dist_mse = (dist.mean - targets_kept.unsqueeze(1)).square().mean(dim=2)
         mu_loss = (allocations * dist_mse).sum(dim=1).mean()  # allocation-weighted MSE
@@ -733,11 +732,16 @@ class ZstackSolver_MixedDensity(ZstackSolver):
     def val_metrics(self, predictions: torch.Tensor, targets: torch.Tensor) -> dict:
         metrics = super().val_metrics(predictions, targets)
         means, logits, _ = self._split_predictions(predictions)
-        errors = means[..., ~self.is_piston] - targets[:, ~self.is_piston].unsqueeze(1)
-        component_mse = errors.square().mean(dim=2)  # [B, K]
+
+        max_allocations = logits.softmax(dim=1).amax(dim=1)
+        metrics["dominant_component_allocation"] = max_allocations.mean()
+
+        residuals = means[..., ~self.is_piston] - targets[:, ~self.is_piston].unsqueeze(1)
+        component_mse = residuals.square().mean(dim=2)  # [B, K]
         batch_idx = torch.arange(means.shape[0], device=means.device)
-        metrics["top_weight_rmse"] = component_mse[batch_idx, logits.argmax(dim=1)].mean().sqrt()
-        metrics["oracle_rmse"] = component_mse.min(dim=1).values.mean().sqrt()  # if < top_weight, output is multimodal
+        metrics["dominant_component_rmse"] = component_mse[batch_idx, logits.argmax(dim=1)].mean().sqrt()
+        metrics["best_component_rmse"] = component_mse.amin(dim=1).mean().sqrt()
+
         return metrics
 
     def predict_distribution(self, images: torch.Tensor) -> torch.distributions.MixtureSameFamily:
