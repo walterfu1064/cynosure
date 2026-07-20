@@ -160,6 +160,16 @@ class ZstackSolver(pl.LightningModule):
         """Convenience pass-through"""
         return self.propagator.num_amp_coefs
 
+    @property
+    def num_coefs(self) -> int:
+        """Convenience pass-through"""
+        return self.num_phase_coefs + self.num_amp_coefs
+
+    @property
+    def num_nonpiston_coefs(self) -> int:
+        """Number of non-piston coefficients modeled"""
+        return int((~self.is_piston).sum())
+
     # Coefficient whitening
 
     def _setup_whitening(self) -> None:
@@ -466,15 +476,9 @@ class ZstackSolver_Covariance(ZstackSolver):
     def _setup_whitening(self) -> None:
         """Also sets up index bookkeeping for the flattened Cholesky factor"""
         super()._setup_whitening()
-        num_kept = int((~self.is_piston).sum())
-        tril_indices = torch.tril_indices(num_kept, num_kept)
+        tril_indices = torch.tril_indices(self.num_nonpiston_coefs, self.num_nonpiston_coefs)
         self.register_buffer("tril_indices", tril_indices)
         self.register_buffer("tril_is_diagonal", tril_indices[0] == tril_indices[1])
-
-    @property
-    def num_kept_coefs(self) -> int:
-        """Number of non-piston coefficients jointly modeled by the Gaussian"""
-        return int((~self.is_piston).sum())
 
     @property
     def decoder_out_dims(self) -> int:
@@ -516,7 +520,7 @@ class ZstackSolver_Covariance(ZstackSolver):
         Also applies softplus to the diagonal, to keep the Cholensky decomposition unique.
         """
         chol_entries = torch.where(self.tril_is_diagonal, F.softplus(chol_entries) + 1e-6, chol_entries)
-        scale_tril = chol_entries.new_zeros(chol_entries.shape[0], self.num_kept_coefs, self.num_kept_coefs)
+        scale_tril = chol_entries.new_zeros(chol_entries.shape[0], self.num_nonpiston_coefs, self.num_nonpiston_coefs)
         scale_tril[:, self.tril_indices[0], self.tril_indices[1]] = chol_entries
         return scale_tril
 
@@ -537,7 +541,7 @@ class ZstackSolver_Covariance(ZstackSolver):
         detached_dist = torch.distributions.MultivariateNormal(
             dist.mean.detach(), scale_tril=dist.scale_tril
         )  # detach the mean so the covariance head can't push it back to the uninformative priors
-        sigma_loss = -detached_dist.log_prob(targets_kept).mean() / self.num_kept_coefs  # per-coefficient scale
+        sigma_loss = -detached_dist.log_prob(targets_kept).mean() / self.num_nonpiston_coefs  # per-coefficient scale
         return mu_loss + sigma_loss, {"mu_mse": mu_loss, "sigma_nll": sigma_loss}
 
     def val_metrics(self, predictions: torch.Tensor, targets: torch.Tensor) -> dict:
@@ -557,3 +561,209 @@ class ZstackSolver_Covariance(ZstackSolver):
             dist.mean * scales + means,
             scale_tril=scales.unsqueeze(-1) * dist.scale_tril,
         )
+
+
+class ZstackSolver_MixedDensity(ZstackSolver):
+    """
+    Extends ZstackSolver, training a decoder to predict a Gaussian mixture over the aberration coefficients.
+    Finally handles multimodality!
+
+    Models up to `num_components` components, each parameterized like the single Gaussian
+    of ZstackSolver_Covariance (i.e., component mean + flattened Cholesky factor), joined
+    by a mixing coefficient for each component.
+    """
+    def __init__(
+            self,
+            *,
+            sim_cfg: SimulationConfig,
+            optics_cfg: OpticalConfig,
+            phase_cfg: ZernikeConfig,
+            amp_cfg: ZernikeConfig,
+            phase_prior_cfg: PriorConfig,
+            amp_prior_cfg: PriorConfig,
+            z_objective: torch.Tensor,
+            object_distribution: torch.Tensor,
+            noise_cfg: Optional[NoiseConfig] = None,
+            learning_rate: float,
+            weight_decay: float,
+            num_components: int,
+            hidden_channels: Sequence[int] = (16, 32),
+            embedding_dims: int = 128,
+            batch_size: int = 32,
+            generator_chunk: int = 4,
+            steps_per_epoch: int = 200,
+            val_batches: int = 32,
+            val_seed: int = 42,
+    ):
+        super().__init__(
+            sim_cfg=sim_cfg,
+            optics_cfg=optics_cfg,
+            phase_cfg=phase_cfg,
+            amp_cfg=amp_cfg,
+            phase_prior_cfg=phase_prior_cfg,
+            amp_prior_cfg=amp_prior_cfg,
+            z_objective=z_objective,
+            object_distribution=object_distribution,
+            noise_cfg=noise_cfg,
+            learning_rate=learning_rate,
+            weight_decay=weight_decay,
+            hidden_channels=hidden_channels,
+            embedding_dims=embedding_dims,
+            batch_size=batch_size,
+            generator_chunk=generator_chunk,
+            steps_per_epoch=steps_per_epoch,
+            val_batches=val_batches,
+            val_seed=val_seed,
+        )
+        self.num_components = num_components
+
+    def _setup_whitening(self) -> None:
+        """Also sets up index bookkeeping for the flattened Cholesky factors"""
+        super()._setup_whitening()
+        tril_indices = torch.tril_indices(self.num_nonpiston_coefs, self.num_nonpiston_coefs)
+        self.register_buffer("tril_indices", tril_indices)
+        self.register_buffer("tril_is_diagonal", tril_indices[0] == tril_indices[1])
+
+    @property
+    def decoder_out_dims(self) -> int:
+        """Per component: mu for every coefficient, flattened Cholesky factor, and a mixing logit"""
+        return self.num_components * (self.num_coefs + self.tril_indices.shape[1] + 1)
+
+    def _setup_decoder(
+            self,
+            hidden_channels: Sequence[int],
+            embedding_dims: int,
+    ) -> nn.Module:
+        """
+        Sets up a decoder with an extra, detached output head for the Cholensky
+        facotrs and the mixing logits.
+        Initializes with no covariance (Cholensky = identity matrix).
+        """
+        num_chol = self.num_components * self.tril_indices.shape[1]
+        decoder = ZstackDecoder_DetachedHead(
+            in_channels=self.num_z,
+            spatial_hidden_channels=hidden_channels,
+            embedding_dims=embedding_dims,
+            out_dims=self.num_components * self.num_coefs,
+            detached_out_dims=self.num_components + num_chol,
+            spatial_size=self.sim_cfg.object_grid_size,
+        )
+
+        inverse_softplus_one = math.log(math.expm1(1.0))  # so softplus of diagonal = 1
+        nn.init.zeros_(decoder.detached_head.weight)
+        with torch.no_grad():
+            chol_bias = torch.where(self.tril_is_diagonal, inverse_softplus_one, 0.0)
+            logit_bias = torch.zeros(self.num_components)
+            decoder.detached_head.bias.copy_(
+                torch.cat([logit_bias, chol_bias.repeat(self.num_components)])
+            )
+        return decoder
+
+    def _split_predictions(
+            self,
+            predictions: torch.Tensor,
+    ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
+        """
+        Convenience method, splits the raw [B, D] decoder output into:
+        - means: [B, K, N] (in whitened space)
+        - logits: [B, K] mixing logits
+        - chol_entries: [B, K, T] flattened Cholesky factors
+        """
+        num_means = self.num_components * self.num_coefs
+        means = predictions[:, :num_means].reshape(-1, self.num_components, self.num_coefs)
+        logits = predictions[:, num_means:num_means + self.num_components]
+        chol_entries = predictions[:, num_means + self.num_components:].reshape(
+            -1, self.num_components, self.tril_indices.shape[1]
+        )
+        return means, logits, chol_entries
+
+    def predicted_means(self, predictions: torch.Tensor) -> torch.Tensor:
+        """Whitened means of the highest-weight component"""
+        means, logits, _ = self._split_predictions(predictions)
+        batch_idx = torch.arange(means.shape[0], device=means.device)
+        return means[batch_idx, logits.argmax(dim=1)]
+
+    def _to_scale_tril(self, chol_entries: torch.Tensor) -> torch.Tensor:
+        """
+        Converts the flattened [..., T] Cholesky factors to lower-triangular [..., N_kept, N_kept].
+        Also applies softplus to the diagonal, to keep the Cholesky decomposition unique.
+        """
+        chol_entries = torch.where(self.tril_is_diagonal, F.softplus(chol_entries) + 1e-6, chol_entries)
+        scale_tril = chol_entries.new_zeros(*chol_entries.shape[:-1], self.num_nonpiston_coefs, self.num_nonpiston_coefs)
+        scale_tril[..., self.tril_indices[0], self.tril_indices[1]] = chol_entries
+        return scale_tril
+
+    def _whitened_mixture(self, predictions: torch.Tensor) -> torch.distributions.MixtureSameFamily:
+        """Reads the raw decoder output as a Gaussian mixture in whitened space (non-piston coefs only)"""
+        means, logits, chol_entries = self._split_predictions(predictions)
+        components = torch.distributions.MultivariateNormal(
+            means[..., ~self.is_piston], scale_tril=self._to_scale_tril(chol_entries)
+        )
+        weights = torch.distributions.Categorical(logits=logits)
+        return torch.distributions.MixtureSameFamily(weights, components)
+
+    def compute_losses(
+            self,
+            predictions: torch.Tensor,
+            targets: torch.Tensor,
+    ) -> tuple[torch.Tensor, dict]:
+        mixture = self._whitened_mixture(predictions)
+        dist = mixture.component_distribution
+        targets_kept = targets[:, ~self.is_piston]
+
+        with torch.no_grad():  # allocations to components under current mixture, Prob(component | target)
+            log_joint = mixture.mixture_distribution.logits + dist.log_prob(targets_kept.unsqueeze(1))
+            allocations = log_joint.softmax(dim=1)  #
+
+        dist_mse = (dist.mean - targets_kept.unsqueeze(1)).square().mean(dim=2)
+        mu_loss = (allocations * dist_mse).sum(dim=1).mean()  # allocation-weighted MSE
+
+        detached_mixture = torch.distributions.MixtureSameFamily(
+            mixture.mixture_distribution,
+            torch.distributions.MultivariateNormal(
+                dist.mean.detach(), scale_tril=dist.scale_tril
+            ),
+        )  # detach the mean so the covariance head can't push it back to the uninformative priors
+        sigma_nll = -detached_mixture.log_prob(targets_kept).mean() / self.num_nonpiston_coefs  # per-coefficient scale
+
+        weight_entropy = mixture.mixture_distribution.entropy().mean()  # 0 if sticks to one component, log(K) else
+        logs = {"mu_mse": mu_loss, "sigma_nll": sigma_nll, "weight_entropy": weight_entropy}
+        return mu_loss + sigma_nll, logs
+
+    def val_metrics(self, predictions: torch.Tensor, targets: torch.Tensor) -> dict:
+        metrics = super().val_metrics(predictions, targets)
+        means, logits, _ = self._split_predictions(predictions)
+        errors = means[..., ~self.is_piston] - targets[:, ~self.is_piston].unsqueeze(1)
+        component_mse = errors.square().mean(dim=2)  # [B, K]
+        batch_idx = torch.arange(means.shape[0], device=means.device)
+        metrics["top_weight_rmse"] = component_mse[batch_idx, logits.argmax(dim=1)].mean().sqrt()
+        metrics["oracle_rmse"] = component_mse.min(dim=1).values.mean().sqrt()  # if < top_weight, output is multimodal
+        return metrics
+
+    def predict_distribution(self, images: torch.Tensor) -> torch.distributions.MixtureSameFamily:
+        """Predicts the physical-space mixture distributions (excluding the pinned piston coefs)"""
+        means, logits, chol_entries = self._split_predictions(self.forward(images))
+        scales = self.target_scales[~self.is_piston]
+        components = torch.distributions.MultivariateNormal(
+            means[..., ~self.is_piston] * scales + self.target_means[~self.is_piston],
+            scale_tril=scales.unsqueeze(-1) * self._to_scale_tril(chol_entries),
+        )
+        return torch.distributions.MixtureSameFamily(
+            torch.distributions.Categorical(logits=logits), components
+        )
+
+    def predict_component_coefficients(
+            self,
+            images: torch.Tensor,
+    ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
+        """
+        Predicts the physical-space joint coefficient distributions for each component.
+
+        Returns:
+        - weights: [B, K] mixture weights
+        - phase_coefs: [B, K, num_phase_coefs]
+        - amp_coefs: [B, K, num_amp_coefs]
+        """
+        means, logits, _ = self._split_predictions(self.forward(images))
+        coefs = means * self.target_scales + self.target_means
+        return logits.softmax(dim=1), coefs[..., :self.num_phase_coefs], coefs[..., self.num_phase_coefs:]
