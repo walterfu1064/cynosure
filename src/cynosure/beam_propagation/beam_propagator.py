@@ -90,9 +90,9 @@ class BeamPropagator(nn.Module):
             )
 
         # Objective is immersed in n1, sample medium is n2 -> physically moving the objective
-        # by dz moves the focal plane by (n1/n2)*dz, so we need to rescale z.
+        # by dz moves the focal plane by (n2/n1)*dz, so we need to rescale z.
         # Identity scaling for indexed-matched systems (default when immersion_index == None).
-        self.axial_scale = self.immersion_index / self.medium_index
+        self.axial_scale = self.medium_index / self.immersion_index
 
         if self.aperture_type not in ("flat", "gaussian", "supergaussian", "fitted"):
             raise ValueError(
