@@ -342,7 +342,7 @@ class ZstackSolver(pl.LightningModule):
             generator: Optional[torch.Generator] = None,
     ) -> torch.Tensor:
         """
-        Samples [B,] in-medium defocus offsets uniformly over [-z_jitter, z_jitter].
+        Samples [B,] objective-z defocus offsets uniformly over [-z_jitter, z_jitter].
         If `z_jitter` is 0, returns zeros.
         """
         if self.z_jitter == 0:
