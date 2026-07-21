@@ -21,8 +21,8 @@ def plot_stack(stack: np.ndarray, panel_size: float = 3):
     """Plots a [N, H, W] image stack along a row of panels"""
     num_z = stack.shape[0]
     figsize = (panel_size * num_z, panel_size)
-    fig, axarr = pyplot.subplots(1, num_z, figsize=figsize)
-    for i, ax in enumerate(axarr):
+    fig, axarr = pyplot.subplots(1, num_z, figsize=figsize, squeeze=False)
+    for i, ax in enumerate(axarr.ravel()):
         ax.imshow(stack[i], vmin=0)
     for ax in axarr.ravel():
         ax.set_xticks([])
