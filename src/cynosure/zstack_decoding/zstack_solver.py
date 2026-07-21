@@ -62,6 +62,7 @@ class ZstackSolver(pl.LightningModule):
             amp_prior_cfg: PriorConfig,
             object_distribution: torch.Tensor,
             z_objective: Optional[torch.Tensor] = None,
+            z_jitter: float = 0.0,
             noise_cfg: Optional[NoiseConfig] = None,
             learning_rate: float = 1.0e-3,
             weight_decay: float = 1.0e-3,
@@ -91,7 +92,10 @@ class ZstackSolver(pl.LightningModule):
             z_objective = torch.zeros((1,), dtype=self.ftype)
         self.register_buffer("z_objective", z_objective.to(self.ftype))
         self.num_z = z_objective.shape[0]
+        self.z_jitter = z_jitter
 
+        self._setup_piston_flags()
+        self._setup_jitter_decomposition()  # must come before whitening, which widens the jittered target scales
         self._setup_whitening()  # must be initialized before decoder
         self.decoder = self._setup_decoder(hidden_channels, embedding_dims)
 
@@ -172,6 +176,40 @@ class ZstackSolver(pl.LightningModule):
         """Number of non-piston coefficients modeled"""
         return int((~self.is_piston).sum())
 
+    def _setup_piston_flags(self) -> None:
+        """
+        Registers which coefficients are piston-types, which are handled differently throughout.
+        Phase piston because the intensity doesn't care, intensity piston because we normalize anyway.
+        """
+
+        phase_nm = self.propagator.phase_projector.nm_indices
+        is_phase_piston = (phase_nm == 0).all(dim=1)
+
+        amp_nm = self.propagator.amp_projector.nm_indices
+        is_amp_piston = (amp_nm == 0).all(dim=1)
+
+        self.register_buffer("is_phase_piston", is_phase_piston)
+        self.register_buffer("is_amp_piston", is_amp_piston)
+        self.register_buffer("is_piston", torch.cat([self.is_phase_piston, self.is_amp_piston], dim=0))
+
+    def _setup_jitter_decomposition(self) -> None:
+        """
+        Pre-calculates the projection of the defocus operator onto the phase Zernike
+        basis so z-jitter can be represented in phase aberration space during training.
+        """
+        mask = self.propagator.pupil_mask
+        is_phase_piston = self.is_phase_piston
+
+        basis = self.propagator.phase_projector.zernike_bank[:, mask]  # [num_elements, num_pixels]
+        if not is_phase_piston.any():  # make sure a piston column exists so the fitting works
+            basis = torch.cat([basis, torch.ones_like(basis[:1])], dim=0)
+        waves_per_defocus = self.propagator.axial_wavenumber[mask] / (2 * torch.pi)
+
+        solution = torch.linalg.lstsq(basis.T, waves_per_defocus.unsqueeze(1)).solution
+        coefs = solution[:self.num_phase_coefs, 0]  # drops the constant column, if added
+        coefs = torch.where(is_phase_piston, 0.0, coefs)
+        self.register_buffer("defocus_phase_coefs", coefs.to(self.ftype))  # [num_elements,]
+
     # Coefficient whitening
 
     def _setup_whitening(self) -> None:
@@ -182,25 +220,23 @@ class ZstackSolver(pl.LightningModule):
 
         Amplitude piston term has mean 1, other terms have mean 0 (see `generate_coefficients`).
 
-        Also create masks for the amplitude and phase piston terms so they won't be fitted.
-        Phase piston because the intensity doesn't care, intensity piston because we normalize anyway.
+        If `z_jitter` is set, widen the priors accordingly to keep the whitened targets magnitude 1.
         """
 
         phase_nm = self.propagator.phase_projector.nm_indices
-        is_phase_piston = (phase_nm == 0).all(dim=1)
         phase_means = torch.zeros(self.num_phase_coefs, dtype=self.ftype)
         phase_scales = self.phase_prior_cfg.coef_scales(phase_nm).to(self.ftype)
+        if self.z_jitter > 0:
+            z_jitter_adjusted = self.propagator.defocus_from_objective_z(self.z_jitter)
+            jitter_var = z_jitter_adjusted**2 / 3  # variance for a uniform distrib over +/- z_jitter_adjusted
+            phase_scales = torch.sqrt(phase_scales**2 + jitter_var * self.defocus_phase_coefs**2)
 
         amp_nm = self.propagator.amp_projector.nm_indices
-        is_amp_piston = (amp_nm == 0).all(dim=1)
-        amp_means = is_amp_piston.to(self.ftype)
+        amp_means = self.is_amp_piston.to(self.ftype)
         amp_scales = self.amp_prior_cfg.coef_scales(amp_nm).to(self.ftype)
 
         self.register_buffer("target_means", torch.cat([phase_means, amp_means], dim=0))
         self.register_buffer("target_scales", torch.cat([phase_scales, amp_scales], dim=0))
-        self.register_buffer("is_phase_piston", is_phase_piston)
-        self.register_buffer("is_amp_piston", is_amp_piston)
-        self.register_buffer("is_piston", torch.cat([self.is_phase_piston, self.is_amp_piston], dim=0))
 
     def whiten_targets(self, phase_coefs: torch.Tensor, amp_coefs: torch.Tensor) -> torch.Tensor:
         """Whitens the [B, N] labels and cats them into a [B, N_tot] regression target"""
@@ -300,9 +336,42 @@ class ZstackSolver(pl.LightningModule):
             image_chunks.append(img.reshape(stop - start, self.num_z, *img.shape[-2:]))
         return torch.cat(image_chunks)
 
-    def _batched_defocus(self, batch_size: int) -> torch.Tensor:
-        """Returns the [B, num_z] in-medium defocus corresponding to the stored z positions"""
+    def _sample_z_jitter(
+            self,
+            batch_size: int,
+            generator: Optional[torch.Generator] = None,
+    ) -> torch.Tensor:
+        """
+        Samples [B,] in-medium defocus offsets uniformly over [-z_jitter, z_jitter].
+        If `z_jitter` is 0, returns zeros.
+        """
+        if self.z_jitter == 0:
+            return torch.zeros(batch_size, dtype=self.ftype, device=self.device)
+        uniform = torch.rand(batch_size, generator=generator, dtype=self.ftype, device=self.device)
+        return (uniform * 2 - 1) * self.z_jitter
+
+    def _z_jitter_to_phase_coefs(self, z_offsets: torch.Tensor) -> torch.Tensor:
+        """
+        Returns the [..., num_phase] aberrations equivalent to the [...,] z-offsets (in objective-z units).
+
+        Synthetic images will be calculated using the z-offsets but not this phase, while
+        their phase coef labels will include this phase in place of the z-offsets.
+        """
+        defocus = self.propagator.defocus_from_objective_z(z_offsets)
+        return defocus.unsqueeze(1) * self.defocus_phase_coefs
+
+    def _batched_defocus(
+            self,
+            batch_size: int,
+            offsets: Optional[torch.Tensor] = None,
+    ) -> torch.Tensor:
+        """
+        Returns the [B, num_z] in-medium defocus corresponding to the stored z positions.
+        Rigidly shifts each z-stack by `offsets` (in objective-z units) if given.
+        """
         z = self.z_objective.unsqueeze(0).expand(batch_size, self.num_z)
+        if offsets is not None:
+            z = z + offsets.unsqueeze(1)
         return self.propagator.defocus_from_objective_z(z)
 
     def _apply_noise(
@@ -320,17 +389,19 @@ class ZstackSolver(pl.LightningModule):
             phase_coefs: torch.Tensor,
             amp_coefs: torch.Tensor,
             with_noise: bool = False,
+            offsets: Optional[torch.Tensor] = None,
             generator: Optional[torch.Generator] = None,
     ) -> torch.Tensor:
         """
         Forwards-simulates the normalized z-stacks at the model's own z positions
         from physical [B, N] coefficients (e.g. as returned by `predict_coefficients`).
         If `with_noise`, adds noise before normalizing.
+        If `offsets` is given, rigidly shifts each z-stack, preserving the relative z-spacing.
 
         Returns [B, num_z, H, W].
         """
         with torch.no_grad():
-            z = self._batched_defocus(phase_coefs.shape[0])
+            z = self._batched_defocus(phase_coefs.shape[0], offsets=offsets)
             images = self._simulate_stacks(z, phase_coefs, amp_coefs)
             if with_noise:
                 images = self._apply_noise(images, generator)
@@ -345,13 +416,20 @@ class ZstackSolver(pl.LightningModule):
         Samples a set of aberrations, forwards-simulates the z-stacks, corrupts
         them with the noise model, and normalizes them for use as inputs to the CNN.
 
+        If `z_jitter` is set, calculates the synthetic z-stacks under random rigid offsets,
+        and adds the defocus-equivalent phase shifts to the synthetic labels.
+
         Returns:
         - images: [B, num_z, H, W] normalized z-stacks
-        - phase_coefs: [B, num_phase_coefs] phase aberratoin coefficients
+        - phase_coefs: [B, num_phase_coefs] effective phase aberration coefficients (including jitter offsets)
         - amp_coefs: [B, num_amp_coefs] amp aberration coefficients
         """
         phase_coefs, amp_coefs = self.generate_phase_amp_coefficients(batch_size, self.device, generator)
-        images = self.simulate_normalized_stacks(phase_coefs, amp_coefs, with_noise=True, generator=generator)
+        offsets = self._sample_z_jitter(batch_size, generator=generator)
+        images = self.simulate_normalized_stacks(
+            phase_coefs, amp_coefs, with_noise=True, offsets=offsets, generator=generator
+        )
+        phase_coefs = phase_coefs + self._z_jitter_to_phase_coefs(offsets)
         return images, phase_coefs, amp_coefs
 
     def _pacing_loader(self, num_batches: int) -> DataLoader:
@@ -585,6 +663,7 @@ class ZstackSolver_MixedDensity(ZstackSolver):
             amp_prior_cfg: PriorConfig,
             object_distribution: torch.Tensor,
             z_objective: Optional[torch.Tensor] = None,
+            z_jitter: float = 0.0,
             noise_cfg: Optional[NoiseConfig] = None,
             num_components: int = 4,
             learning_rate: float = 1.0e-3,
@@ -606,6 +685,7 @@ class ZstackSolver_MixedDensity(ZstackSolver):
             phase_prior_cfg=phase_prior_cfg,
             amp_prior_cfg=amp_prior_cfg,
             z_objective=z_objective,
+            z_jitter=z_jitter,
             object_distribution=object_distribution,
             noise_cfg=noise_cfg,
             learning_rate=learning_rate,
