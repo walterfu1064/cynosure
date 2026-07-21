@@ -60,11 +60,11 @@ class ZstackSolver(pl.LightningModule):
             amp_cfg: ZernikeConfig,
             phase_prior_cfg: PriorConfig,
             amp_prior_cfg: PriorConfig,
-            z_objective: torch.Tensor,
             object_distribution: torch.Tensor,
+            z_objective: Optional[torch.Tensor] = None,
             noise_cfg: Optional[NoiseConfig] = None,
-            learning_rate: float,
-            weight_decay: float,
+            learning_rate: float = 1.0e-3,
+            weight_decay: float = 1.0e-3,
             hidden_channels: Sequence[int] = (16, 32),
             embedding_dims: int = 128,
             batch_size: int = 32,
@@ -87,6 +87,8 @@ class ZstackSolver(pl.LightningModule):
         self.noise_model = NoiseModel(noise_cfg) if noise_cfg is not None else None
         self.ftype = self.propagator.ftype
 
+        if z_objective is None:
+            z_objective = torch.zeros((1,), dtype=self.ftype)
         self.register_buffer("z_objective", z_objective.to(self.ftype))
         self.num_z = z_objective.shape[0]
 
@@ -581,12 +583,12 @@ class ZstackSolver_MixedDensity(ZstackSolver):
             amp_cfg: ZernikeConfig,
             phase_prior_cfg: PriorConfig,
             amp_prior_cfg: PriorConfig,
-            z_objective: torch.Tensor,
             object_distribution: torch.Tensor,
+            z_objective: Optional[torch.Tensor] = None,
             noise_cfg: Optional[NoiseConfig] = None,
-            learning_rate: float,
-            weight_decay: float,
-            num_components: int,
+            num_components: int = 4,
+            learning_rate: float = 1.0e-3,
+            weight_decay: float = 1.0e-3,
             hidden_channels: Sequence[int] = (16, 32),
             embedding_dims: int = 128,
             batch_size: int = 32,
