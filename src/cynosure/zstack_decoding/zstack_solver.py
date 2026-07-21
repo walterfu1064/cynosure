@@ -89,7 +89,7 @@ class ZstackSolver(pl.LightningModule):
         self.ftype = self.propagator.ftype
 
         if z_objective is None:
-            z_objective = torch.zeros((1,), dtype=self.ftype)
+            z_objective = torch.full((1,), fill_value=z_jitter, dtype=self.ftype)
         self.register_buffer("z_objective", z_objective.to(self.ftype))
         self.num_z = z_objective.shape[0]
         self.z_jitter = z_jitter
