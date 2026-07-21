@@ -658,6 +658,10 @@ class ZstackSolver_MixedDensity(ZstackSolver):
             decoder.detached_head.bias.copy_(
                 torch.cat([logit_bias, chol_bias.repeat(self.num_components)])
             )
+
+            generator = torch.Generator().manual_seed(0)
+            mean_bias = torch.randn(self.num_components, self.num_coefs, generator=generator)
+            decoder.project.bias.copy_(mean_bias.flatten())  # seed with an O(1) spread to encourage specialization
         return decoder
 
     def _split_predictions(
