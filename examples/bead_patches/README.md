@@ -36,14 +36,21 @@ Each source file  is a bead z-stack at `NA095/<acquisition>/stack/stack.tif` wit
 record, with axis order `[z, row, col]`. Each patch is a 32x32 pixel spatial crop,
 keeping the full z range of the source stack.
 
-| Patch file           | Source z-stack (`NA095/…/stack/stack.tif`) | Approx. bead center (row, col) | Crop (rows, cols)    | Axial step |
-|----------------------|--------------------------------------------|--------------------------------|----------------------|------------|
-| `bead_patch_01.tiff` | `Z-Stack 13-08-2021 01.15.19`            | (1400, 262)                    | 1384:1416, 246:278   | 0.12 um    |
-| `bead_patch_02.tiff` | `Z-Stack 13-08-2021 01.15.19`            | (1407, 596)                    | 1391:1423, 580:612   | 0.12 um    |
-| `bead_patch_03.tiff` | `Z-Stack 13-08-2021 01.15.19`            | (780, 1210)                    | 764:796,  1194:1226  | 0.12 um    |
-| `bead_patch_04.tiff` | `Z-Stack 13-08-2021 01.15.19`            | (276, 1285)                    | 260:292,  1269:1301  | 0.12 um    |
-| `bead_patch_05.tiff` | `Z-Stack 13-08-2021 01.21.20`            | (670, 560)                     | 654:686,  544:576    | 0.13 um    |
-| `bead_patch_06.tiff` | `Z-Stack 13-08-2021 01.27.01`            | (1217, 1592)                   | 1201:1233, 1576:1608 | 0.13 um    |
+| Patch file           | Source z-stack (`NA095/…/stack/stack.tif`) | Approx. bead center (row, col) | Crop (rows, cols)    | Axial step* |
+|----------------------|--------------------------------------------|--------------------------------|----------------------|-------------|
+| `bead_patch_01.tiff` | `Z-Stack 13-08-2021 01.15.19`            | (1400, 262)                    | 1384:1416, 246:278   | 0.12 um     |
+| `bead_patch_02.tiff` | `Z-Stack 13-08-2021 01.15.19`            | (1407, 596)                    | 1391:1423, 580:612   | 0.12 um     |
+| `bead_patch_03.tiff` | `Z-Stack 13-08-2021 01.15.19`            | (780, 1210)                    | 764:796,  1194:1226  | 0.12 um     |
+| `bead_patch_04.tiff` | `Z-Stack 13-08-2021 01.15.19`            | (276, 1285)                    | 260:292,  1269:1301  | 0.12 um     |
+| `bead_patch_05.tiff` | `Z-Stack 13-08-2021 01.21.20`            | (670, 560)                     | 654:686,  544:576    | 0.13 um     |
+| `bead_patch_06.tiff` | `Z-Stack 13-08-2021 01.27.01`            | (1217, 1592)                   | 1201:1233, 1576:1608 | 0.13 um     |
+
+\* I think these are in-medium distances, i.e. already corrected for the embedding medium's index of refraction,
+but I'm not sure. With that assumption, fitted reconstruction of these patches consistently requires a fudge factor
+of ~0.6-0.7x in the  axial scale, which I haven't been able to explain yet (see
+[`zstack_fitting/example_1.ipynb`](zstack_fitting/example_1.ipynb)). If these listed axial steps are assumed
+to be in air, though, the fudge factor needs to be more like 0.5x. I guess I'll leave this discrepancy as an
+exercise for the reader for now?
 
 Crop convention (half-open intervals): `stack[:, center_row-16 : center_row+16, center_col-16 : center_col+16]`.
 
