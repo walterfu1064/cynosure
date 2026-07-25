@@ -265,12 +265,12 @@ class TestAxialScaling:
         assert torch.allclose(prop.defocus_from_objective_z(z), z)
 
     def test_mismatch_scale_is_immersion_over_medium(self):
-        """Under a mismatch, nominal objective positions rescale by immersion_index/medium_index"""
+        """Under a mismatch, nominal objective positions rescale by medium_index/immersion_index"""
         n1, n2 = 1.0, 1.5
         prop = make_propagator(NA=0.2, medium_index=n2, immersion_index=n1)
-        assert prop.axial_scale == pytest.approx(n1 / n2)
+        assert prop.axial_scale == pytest.approx(n2 / n1)
         z = torch.linspace(-3, 3, 7, dtype=prop.ftype)
-        assert torch.allclose(prop.defocus_from_objective_z(z), z * (n1 / n2))
+        assert torch.allclose(prop.defocus_from_objective_z(z), z * (n2 / n1))
 
     def test_scaling_only_affects_axis_not_focusing(self):
         """PSFs under different immersion indices should be identical at a given, in-medium, defocus"""
