@@ -534,13 +534,21 @@ class ZstackSolver_Heteroscedastic(ZstackSolver):
         metrics["z_std"] = z_scores.std()  # ~1 when the sigmas are calibrated
         return metrics
 
-    def predict_distribution(self, images: torch.Tensor) -> torch.distributions.Normal:
-        """Predicts the physical-space coefficient distributions"""
+    def predict_distribution(self, images: torch.Tensor) -> torch.distributions.Independent:
+        """
+        Predicts the physical-space joint coefficient distributions (excluding the pinned piston coefs).
+        Joint distribution is diagonal, but wrap it as the marginal of a full pairwise multivariate
+        distribution for API consistency with other solver variants.
+        """
         dist = self._whitened_normal(self.forward(images))
-        return torch.distributions.Normal(
-            dist.mean * self.target_scales + self.target_means,
-            dist.stddev * self.target_scales,
+        keep = ~self.is_piston
+        scales = self.target_scales[keep]
+        means = self.target_means[keep]
+        marginals = torch.distributions.Normal(
+            dist.mean[:, keep] * scales + means,
+            dist.stddev[:, keep] * scales,
         )
+        return torch.distributions.Independent(marginals, reinterpreted_batch_ndims=1)
 
 
 class ZstackSolver_Covariance(ZstackSolver):
