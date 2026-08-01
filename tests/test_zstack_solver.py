@@ -5,10 +5,14 @@ Unit tests for zstack_solver.py.
 import torch
 
 from cynosure.config import SimulationConfig, OpticalConfig, PriorConfig, ZernikeConfig
-from cynosure.zstack_decoding.zstack_solver import ZstackSolver, make_object_distribution
+from cynosure.zstack_decoding.zstack_solver import (
+    ZstackSolver,
+    ZstackSolver_MixedDensity,
+    make_object_distribution,
+)
 
 
-def make_solver(*, z_objective=None, z_jitter=0.0, phase_allowed=((2, 0),)):
+def make_solver(*, z_objective=None, z_jitter=0.0, phase_allowed=((2, 0),), solver_cls=ZstackSolver, **kwargs):
     """Builds a minimal solver for testing synthetic data generation"""
     sim_cfg = SimulationConfig(pupil_grid_size=63, object_grid_size=31, object_pixel_size=0.1)
     opt_cfg = OpticalConfig(
@@ -24,7 +28,7 @@ def make_solver(*, z_objective=None, z_jitter=0.0, phase_allowed=((2, 0),)):
     amp_cfg = ZernikeConfig(0)  # amplitude piston only
     object_distrib = make_object_distribution(sim_cfg.object_grid_size, sim_cfg.object_pixel_size, 0.1)
 
-    return ZstackSolver(
+    return solver_cls(
         sim_cfg=sim_cfg,
         optics_cfg=opt_cfg,
         phase_cfg=phase_cfg,
@@ -35,6 +39,7 @@ def make_solver(*, z_objective=None, z_jitter=0.0, phase_allowed=((2, 0),)):
         z_objective=z_objective,
         z_jitter=z_jitter,
         generator_chunk=8,
+        **kwargs,
     )
 
 
@@ -68,3 +73,28 @@ def test_reconstruction_through_z_offset():
 
     recon = solver.simulate_normalized_stacks(phase_coefs, amp_coefs, offsets=None)
     assert _rel_l1(recon, images) < 5e-3
+
+
+def _mixing_logit_grads(solver: ZstackSolver_MixedDensity) -> torch.Tensor:
+    """Runs one loss backward and returns the gradient reaching the mixing logits"""
+    generator = torch.Generator().manual_seed(0)
+    images, phase_coefs, amp_coefs = solver.create_examples(4, generator=generator)
+    targets = solver.whiten_targets(phase_coefs, amp_coefs)
+
+    predictions = solver.forward(images).detach().requires_grad_(True)
+    loss, _ = solver.compute_losses(predictions, targets)
+    loss.backward()
+
+    num_means = solver.num_components * solver.num_coefs
+    return predictions.grad[:, num_means:num_means + solver.num_components]
+
+
+def test_mixing_warmup_freezes_weights():
+    """During the mixing warmup the logits get no gradient; without it (or after it) they do"""
+    kwargs = dict(z_jitter=1.0, phase_allowed=((2, 0), (2, 2)), solver_cls=ZstackSolver_MixedDensity, num_components=2)
+
+    warm = make_solver(mixing_warmup_epochs=1, **kwargs)  # current_epoch is 0 without a trainer
+    assert torch.all(_mixing_logit_grads(warm) == 0)
+
+    cold = make_solver(mixing_warmup_epochs=0, **kwargs)
+    assert torch.any(_mixing_logit_grads(cold) != 0)
