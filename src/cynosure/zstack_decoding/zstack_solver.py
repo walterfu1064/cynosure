@@ -659,6 +659,10 @@ class ZstackSolver_MixedDensity(ZstackSolver):
     Models up to `num_components` components, each parameterized like the single Gaussian
     of ZstackSolver_Covariance (i.e., component mean + flattened Cholesky factor), joined
     by a mixing coefficient for each component.
+
+    `mixing_warmup_epochs` holds the mixing weights uniform and frozen for the
+    first epochs so the component means can specialize before the weights are learned.
+    Without it, multimodal targets tend to collapse onto a single component early.
     """
     def __init__(
             self,
@@ -674,6 +678,7 @@ class ZstackSolver_MixedDensity(ZstackSolver):
             z_jitter: float = 0.0,
             noise_cfg: Optional[NoiseConfig] = None,
             num_components: int = 4,
+            mixing_warmup_epochs: int = 0,
             learning_rate: float = 1.0e-3,
             weight_decay: float = 1.0e-3,
             hidden_channels: Sequence[int] = (16, 32),
@@ -685,6 +690,7 @@ class ZstackSolver_MixedDensity(ZstackSolver):
             val_seed: int = 42,
     ):
         self.num_components = num_components  # must come before decoder init
+        self.mixing_warmup_epochs = mixing_warmup_epochs
         super().__init__(
             sim_cfg=sim_cfg,
             optics_cfg=optics_cfg,
@@ -795,6 +801,19 @@ class ZstackSolver_MixedDensity(ZstackSolver):
         weights = torch.distributions.Categorical(logits=logits)
         return torch.distributions.MixtureSameFamily(weights, components)
 
+    def _mixing_logits(self, mixture: torch.distributions.MixtureSameFamily) -> torch.Tensor:
+        """
+        Mixing logits used by the losses.
+
+        During the mixing warmup epochs, the learned logits are replaced with uniform constants
+        to keep them frozen. This lets the components specialize before the mixture weights
+        are learned, so multimodal targets don't collapse too early.
+        """
+        logits = mixture.mixture_distribution.logits
+        if self.current_epoch < self.mixing_warmup_epochs:
+            return torch.zeros_like(logits)
+        return logits
+
     def compute_losses(
             self,
             predictions: torch.Tensor,
@@ -802,17 +821,18 @@ class ZstackSolver_MixedDensity(ZstackSolver):
     ) -> tuple[torch.Tensor, dict]:
         mixture = self._whitened_mixture(predictions)
         dist = mixture.component_distribution
+        mixing_logits = self._mixing_logits(mixture)
         targets_kept = targets[:, ~self.is_piston]
 
         with torch.no_grad():  # allocations to components under current mixture, Prob(component | target)
-            log_joint = mixture.mixture_distribution.logits + dist.log_prob(targets_kept.unsqueeze(1))
+            log_joint = mixing_logits + dist.log_prob(targets_kept.unsqueeze(1))
             allocations = log_joint.softmax(dim=1)
 
         dist_mse = (dist.mean - targets_kept.unsqueeze(1)).square().mean(dim=2)
         mu_loss = (allocations * dist_mse).sum(dim=1).mean()  # allocation-weighted MSE
 
         detached_mixture = torch.distributions.MixtureSameFamily(
-            mixture.mixture_distribution,
+            torch.distributions.Categorical(logits=mixing_logits),
             torch.distributions.MultivariateNormal(
                 dist.mean.detach(), scale_tril=dist.scale_tril
             ),
