@@ -101,6 +101,17 @@ class ForwardZstack(nn.Module):
         """Convenience pass-through"""
         return self.propagator.num_amp_coefs
 
+    @property
+    def z_scale(self) -> float:
+        if self.fit_zscale:
+            return torch.exp(self.log_zscale).item()
+        else:
+            return 1.0
+
+    @property
+    def z_offset(self) -> float:
+        return self.max_z_adjust * torch.tanh(self.z_adjust_logit).item()
+
     def get_recalibrated_z(self) -> torch.Tensor:
         """Scales and shifts the nominal z-positions by the learned parameters"""
         z_defocus = self.propagator.defocus_from_objective_z(self.z_objective)  # objective travel -> in-medium defocus
