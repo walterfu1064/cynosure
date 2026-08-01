@@ -12,11 +12,17 @@
           most probable aberrations coefficients and the univariate uncertainty of each.
    3. [`zstack_decoding/example_2c.ipynb`](zstack_decoding/example_2c.ipynb) - Estimation of the
           most probable aberrations coefficients and their pairwise covariance matrix.
+   4. [`zstack_decoding/example_2d.ipynb`](zstack_decoding/example_2d.ipynb) - Estimation of a full
+          mixture density over the aberration coefficients, from a single image rather than a z-stack.
+          Trains under a jittered focus position, and resolves the resulting bimodal posterior.
 
 ## Data
 
-Both examples use the small, real bead patches in
+Example 1 fits the small, real bead patches in
 [`bead_patches/`](bead_patches/), cropped from a third-party, open-access
 dataset (CC BY 4.0). See [`bead_patches/README.md`](bead_patches/README.md)
 for full provenance, attribution, licensing, and crop parameters, and
 `data/README.md` at the repo root for obtaining the full (~7 GB) dataset.
+
+The decoding examples need no stored data at all, since each trains against synthetic images that its own
+forwards model generates on the fly.
