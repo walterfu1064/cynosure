@@ -26,7 +26,7 @@ import torch.nn.functional as F
 from torch.utils.data import DataLoader, TensorDataset
 
 from .noise_model import NoiseModel
-from .zstack_decoder import ZstackDecoder, ZstackDecoder_DetachedHead
+from .submodules import CnnDecoder, CnnDecoder_DetachedHead
 from ..beam_propagation import BeamPropagator
 from ..config import SimulationConfig, OpticalConfig, PriorConfig, ZernikeConfig, NoiseConfig
 from ..utilities.fft_utilities import convolve_psf_with_object
@@ -121,7 +121,7 @@ class ZstackSolver(pl.LightningModule):
     ) -> nn.Module:
         if not hasattr(self, "decoder_out_dims"):
             raise RuntimeError("`decoder_out_dims` is uninitialized, call `_setup_whitening` first")
-        decoder = ZstackDecoder(
+        decoder = CnnDecoder(
             in_channels=self.num_z,
             spatial_hidden_channels=hidden_channels,
             embedding_dims=embedding_dims,
@@ -582,7 +582,7 @@ class ZstackSolver_Covariance(ZstackSolver):
         Sets up a decoder with an extra, detached output head for the Cholensky factor.
         Initializes with no covariance (Cholensky = identity matrix).
         """
-        decoder = ZstackDecoder_DetachedHead(
+        decoder = CnnDecoder_DetachedHead(
             in_channels=self.num_z,
             spatial_hidden_channels=hidden_channels,
             embedding_dims=embedding_dims,
@@ -735,7 +735,7 @@ class ZstackSolver_MixedDensity(ZstackSolver):
         Initializes with no covariance (Cholensky = identity matrix).
         """
         num_chol = self.num_components * self.tril_indices.shape[1]
-        decoder = ZstackDecoder_DetachedHead(
+        decoder = CnnDecoder_DetachedHead(
             in_channels=self.num_z,
             spatial_hidden_channels=hidden_channels,
             embedding_dims=embedding_dims,

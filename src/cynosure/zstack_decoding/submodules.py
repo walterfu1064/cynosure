@@ -24,19 +24,18 @@ def conv_norm_act(
     )
 
 
-class ZstackDecoder(nn.Module):
+class CnnEncoder(nn.Module):
     """
-    Strided CNN followed by flattening to a FFN, for decoding aberration
-    coefficients from a z-stack of images.
+    Strided CNN followed by flattening to a FFN, encoding a z-stack of images
+    into a latent vector.
 
-    [B, Cin, H, W] -> [B, D, Hout, Wout] -> [B, E*Hout*Wout] -> [B, Cout]
+    [B, Cin, H, W] -> [B, D, Hout, Wout] -> [B, D*Hout*Wout] -> [B, E]
     """
     def __init__(
             self,
             in_channels: int,
             spatial_hidden_channels: Sequence[int],
             embedding_dims: int,
-            out_dims: int,
             spatial_size: int,
     ):
         super().__init__()
@@ -59,15 +58,40 @@ class ZstackDecoder(nn.Module):
             nn.GELU(),
         )
 
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        return self.embed(self.cnn(x))
+
+
+class CnnDecoder(CnnEncoder):
+    """
+    Extends CnnEncoder with a linear head, for decoding aberration coefficients
+    from a z-stack of images.
+
+    [B, Cin, H, W] -> [B, E] -> [B, Cout]
+    """
+    def __init__(
+            self,
+            in_channels: int,
+            spatial_hidden_channels: Sequence[int],
+            embedding_dims: int,
+            out_dims: int,
+            spatial_size: int,
+    ):
+        super().__init__(
+            in_channels=in_channels,
+            spatial_hidden_channels=spatial_hidden_channels,
+            embedding_dims=embedding_dims,
+            spatial_size=spatial_size,
+        )
         self.project = nn.Linear(embedding_dims, out_dims)
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
         return self.project(self.embed(self.cnn(x)))
 
 
-class ZstackDecoder_DetachedHead(ZstackDecoder):
+class CnnDecoder_DetachedHead(CnnDecoder):
     """
-    Extends ZstackDecoder with a second head from a detached copy of the embedding.
+    Extends CnnDecoder with a second head from a detached copy of the embedding.
 
     Allows aux outputs (e.g., uncertainty params) to train without mucking up the
     main outputs in the shared trunk.
