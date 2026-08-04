@@ -195,3 +195,111 @@ class MLP(nn.Module):
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
         return self.output(self.hidden(self.input(x)))
+
+
+class FourierEmbed(nn.Module):
+    """
+    Embeds a scalar using a geometric ladder of sinusoids.
+
+    Used to embed the flow-matching time so the MLP can condition on it.
+    Frequencies are geometrically spaced over [min_frequency, max_frequency] in cycles per unit input.
+    Defaults are chosen under the assumption that 0 <= t <= 1.
+    """
+    def __init__(
+            self,
+            embedding_dims: int,
+            min_frequency: float = 1.0,
+            max_frequency: float = 100.0,
+    ):
+        super().__init__()
+
+        assert embedding_dims % 2 == 0, f"embedding_dims must be even, got {embedding_dims}"
+        assert 0 < min_frequency < max_frequency, (
+            "min_frequency must be between 0 and max_frequency, "
+            f"got {min_frequency = } and {max_frequency = }"
+        )
+
+        exponents = torch.linspace(0, 1, embedding_dims // 2)
+        freqs = min_frequency * (max_frequency / min_frequency) ** exponents
+        self.register_buffer("angular_freqs", 2 * torch.pi * freqs)
+
+    def forward(self, t: torch.Tensor) -> torch.Tensor:
+        """
+        Arguments:
+        - t: [...,] scalars to embed
+        Returns:
+        - [..., E] embeddings, sine and cosine halves concatenated
+        """
+        angles = t.unsqueeze(-1) * self.angular_freqs
+        return torch.cat([angles.sin(), angles.cos()], dim=-1)
+
+
+class VelocityField(nn.Module):
+    """
+    Conditional velocity field for flow matching in coefficient space.
+
+    Encapculates three modules:
+    - encoder: CNN that encodes a z-stack into a conditioning vector `q`
+    - time_embed: Fourier embedding for the flow time `t`
+    - mlp: predicts `v(x_t, t | q)`
+    """
+    def __init__(
+            self,
+            in_channels: int,
+            spatial_hidden_channels: Sequence[int],
+            image_embedding_dims: int,
+            spatial_size: int,
+            flow_dims: int,
+            time_embedding_dims: int,
+            hidden_dims: Sequence[int],
+            is_residual: bool = True,
+            residual_dims: Optional[int] = None,
+    ):
+        super().__init__()
+
+        self.encoder = CnnEncoder(
+            in_channels=in_channels,
+            spatial_hidden_channels=spatial_hidden_channels,
+            embedding_dims=image_embedding_dims,
+            spatial_size=spatial_size,
+        )
+
+        self.time_embed = FourierEmbed(time_embedding_dims)
+
+        self.mlp = MLP(
+            flow_dims + time_embedding_dims + image_embedding_dims,
+            hidden_dims,
+            flow_dims,
+            is_residual=is_residual,
+            residual_dims=residual_dims,
+        )
+
+    def encode(self, images: torch.Tensor) -> torch.Tensor:
+        """
+        Encodes the images to embedding vectors for the velocity field to condition on.
+
+        Arguments:
+        - images: [B, Z, H, W] batched z-stacks (or batched single images)
+        Returns:
+        - [B, E], referred to elsewhere as `q`
+        """
+        return self.encoder(images)
+
+    def forward(self, x_t: torch.Tensor, t: torch.Tensor, q: torch.Tensor) -> torch.Tensor:
+        """
+        Takes the current point along the flow (x_t, t) and the conditioning vector q.
+        Sinusoidally embeds the flow time t, concatenates (x_t, t_emb, q), and passes
+        them through the MLP to predict the output velocity.
+
+        In effect, outputs `v(x_t, t | q)`.
+
+        Arguments:
+        - x_t: [B, N] current point along the flow
+        - t: [B,] flow time, in [0, 1]
+        - q: [B, E] conditioning vector, from the encoded data
+        Returns:
+        - [B, N] velocities
+        """
+        t_emb = self.time_embed(t)
+        emb = torch.cat([x_t, t_emb, q], dim=-1)
+        return self.mlp(emb)
