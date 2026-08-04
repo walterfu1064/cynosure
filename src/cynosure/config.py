@@ -109,7 +109,7 @@ class VelocityConfig:
     and how it should be integrated during inference.
     """
     time_embedding_dims: int = 32
-    velocity_hidden_dims: Sequence[int] = (256, 256, 256)
-    velocity_is_residual: bool = True
-    velocity_residual_dims: int = 512
+    hidden_dims: Sequence[int] = (256, 256, 256)
+    is_residual: bool = True
+    residual_dims: int = 512
     num_sample_steps: int = 50
