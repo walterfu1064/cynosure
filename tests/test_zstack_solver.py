@@ -4,7 +4,13 @@ Unit tests for zstack_solver.py.
 
 import torch
 
-from cynosure.config import SimulationConfig, OpticalConfig, PriorConfig, ZernikeConfig
+from cynosure.config import (
+    SimulationConfig,
+    OpticalConfig,
+    PriorConfig,
+    TrainingConfig,
+    ZernikeConfig,
+)
 from cynosure.zstack_decoding.zstack_solver import (
     ZstackSolver,
     ZstackSolver_MixedDensity,
@@ -12,7 +18,20 @@ from cynosure.zstack_decoding.zstack_solver import (
 )
 
 
-def make_solver(*, z_objective=None, z_jitter=0.0, phase_allowed=((2, 0),), solver_cls=ZstackSolver, **kwargs):
+def make_train_cfg(**overrides) -> TrainingConfig:
+    """Training config for tests: small generator chunks, everything else default"""
+    return TrainingConfig(generator_chunk=8, **overrides)
+
+
+def make_solver(
+        *,
+        z_objective=None,
+        z_jitter=0.0,
+        phase_allowed=((2, 0),),
+        solver_cls=ZstackSolver,
+        train_cfg=None,
+        **kwargs,
+):
     """Builds a minimal solver for testing synthetic data generation"""
     sim_cfg = SimulationConfig(pupil_grid_size=63, object_grid_size=31, object_pixel_size=0.1)
     opt_cfg = OpticalConfig(
@@ -29,6 +48,7 @@ def make_solver(*, z_objective=None, z_jitter=0.0, phase_allowed=((2, 0),), solv
     object_distrib = make_object_distribution(sim_cfg.object_grid_size, sim_cfg.object_pixel_size, 0.1)
 
     return solver_cls(
+        train_cfg=train_cfg if train_cfg is not None else make_train_cfg(),
         sim_cfg=sim_cfg,
         optics_cfg=opt_cfg,
         phase_cfg=phase_cfg,
@@ -38,7 +58,6 @@ def make_solver(*, z_objective=None, z_jitter=0.0, phase_allowed=((2, 0),), solv
         object_distribution=object_distrib,
         z_objective=z_objective,
         z_jitter=z_jitter,
-        generator_chunk=8,
         **kwargs,
     )
 
@@ -93,8 +112,8 @@ def test_mixing_warmup_freezes_weights():
     """During the mixing warmup the logits get no gradient; without it (or after it) they do"""
     kwargs = dict(z_jitter=1.0, phase_allowed=((2, 0), (2, 2)), solver_cls=ZstackSolver_MixedDensity, num_components=2)
 
-    warm = make_solver(mixing_warmup_epochs=1, **kwargs)  # current_epoch is 0 without a trainer
+    warm = make_solver(train_cfg=make_train_cfg(mixing_warmup_epochs=1), **kwargs)  # current_epoch is 0 without a trainer
     assert torch.all(_mixing_logit_grads(warm) == 0)
 
-    cold = make_solver(mixing_warmup_epochs=0, **kwargs)
+    cold = make_solver(train_cfg=make_train_cfg(mixing_warmup_epochs=0), **kwargs)
     assert torch.any(_mixing_logit_grads(cold) != 0)

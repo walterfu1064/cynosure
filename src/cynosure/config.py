@@ -7,9 +7,25 @@ within that constraint.
 """
 
 from dataclasses import dataclass, field
-from typing import Literal
+from typing import Literal, Sequence
 
 import torch
+
+
+@dataclass(frozen=True, slots=True)
+class TrainingConfig:
+    """
+    Defines meta-aspects of how a model should train/validate.
+    Encapsulated here to clean up the ZstackSolver constructors.
+    """
+    learning_rate: float = 1.0e-3
+    weight_decay: float = 1.0e-3
+    batch_size: int = 32
+    generator_chunk: int = 4  # chunk size for z-stack simulation to bound peak memory use
+    steps_per_epoch: int = 200
+    val_batches: int = 32
+    val_seed: int = 42  # keeps validation passes consistently seeded
+    mixing_warmup_epochs: int = 0  # only used in `ZstackSolver_MixedDensity` to prevent premature component collapse
 
 
 @dataclass(frozen=True, slots=True)
@@ -84,3 +100,16 @@ class NoiseConfig:
     max_photons: float
     max_background: float
     read_noise: float
+
+
+@dataclass(frozen=True, slots=True)
+class VelocityConfig:
+    """
+    Defines how a VelocityFlow model should be constructed,
+    and how it should be integrated during inference.
+    """
+    time_embedding_dims: int = 32
+    velocity_hidden_dims: Sequence[int] = (256, 256, 256)
+    velocity_is_residual: bool = True
+    velocity_residual_dims: int = 512
+    num_sample_steps: int = 50

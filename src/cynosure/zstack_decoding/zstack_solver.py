@@ -26,9 +26,17 @@ import torch.nn.functional as F
 from torch.utils.data import DataLoader, TensorDataset
 
 from .noise_model import NoiseModel
-from .submodules import CnnDecoder, CnnDecoder_DetachedHead
+from .submodules import CnnDecoder, CnnDecoder_DetachedHead, VelocityField
 from ..beam_propagation import BeamPropagator
-from ..config import SimulationConfig, OpticalConfig, PriorConfig, ZernikeConfig, NoiseConfig
+from ..config import (
+    NoiseConfig,
+    OpticalConfig,
+    PriorConfig,
+    SimulationConfig,
+    TrainingConfig,
+    VelocityConfig,
+    ZernikeConfig,
+)
 from ..utilities.fft_utilities import convolve_psf_with_object
 from ..zernike import ZernikeProjector
 
@@ -54,6 +62,7 @@ class ZstackSolver(pl.LightningModule):
     def __init__(
             self,
             *,
+            train_cfg: TrainingConfig,
             sim_cfg: SimulationConfig,
             optics_cfg: OpticalConfig,
             phase_cfg: ZernikeConfig,
@@ -64,18 +73,12 @@ class ZstackSolver(pl.LightningModule):
             z_objective: Optional[torch.Tensor] = None,
             z_jitter: float = 0.0,
             noise_cfg: Optional[NoiseConfig] = None,
-            learning_rate: float = 1.0e-3,
-            weight_decay: float = 1.0e-3,
             hidden_channels: Sequence[int] = (16, 32),
             embedding_dims: int = 128,
-            batch_size: int = 32,
-            generator_chunk: int = 4,
-            steps_per_epoch: int = 200,
-            val_batches: int = 32,
-            val_seed: int = 42,
     ):
         super().__init__()
 
+        self.train_cfg = train_cfg
         self.sim_cfg = sim_cfg
         self.optics_cfg = optics_cfg
         self.phase_cfg = phase_cfg
@@ -100,14 +103,11 @@ class ZstackSolver(pl.LightningModule):
         self.decoder = self._setup_decoder(hidden_channels, embedding_dims)
 
         self.register_buffer("object_distribution", object_distribution.to(self.ftype))
-        self.learning_rate = learning_rate
-        self.weight_decay = weight_decay
 
-        self.batch_size = batch_size
-        self.generator_chunk = generator_chunk
-        self.steps_per_epoch = steps_per_epoch
-        self.val_batches = val_batches
-        self.val_seed = val_seed
+    @property
+    def batch_size(self) -> int:
+        """Convenience accessor because we call it often, other params should be accessed via `self.train_cfg`"""
+        return self.train_cfg.batch_size
 
     @property
     def decoder_out_dims(self) -> int:
@@ -133,8 +133,8 @@ class ZstackSolver(pl.LightningModule):
     def configure_optimizers(self):
         optimizer = torch.optim.AdamW(
             self.decoder.parameters(),
-            lr=self.learning_rate,
-            weight_decay=self.weight_decay,
+            lr=self.train_cfg.learning_rate,
+            weight_decay=self.train_cfg.weight_decay,
         )
         scheduler = torch.optim.lr_scheduler.CosineAnnealingLR(
             optimizer, T_max=max(1, self.trainer.estimated_stepping_batches),
@@ -324,7 +324,7 @@ class ZstackSolver(pl.LightningModule):
         and [B, N] aberration coefficients. Propagation happens in chunks to bound memory use.
         """
         batch_size = z.shape[0]
-        chunk_size = self.generator_chunk or batch_size
+        chunk_size = self.train_cfg.generator_chunk or batch_size
         image_chunks = []
         for start in range(0, batch_size, chunk_size):
             stop = min(start + chunk_size, batch_size)
@@ -437,10 +437,10 @@ class ZstackSolver(pl.LightningModule):
         return DataLoader(TensorDataset(torch.arange(num_batches)), batch_size=1)
 
     def train_dataloader(self) -> DataLoader:
-        return self._pacing_loader(self.steps_per_epoch)
+        return self._pacing_loader(self.train_cfg.steps_per_epoch)
 
     def val_dataloader(self) -> DataLoader:
-        return self._pacing_loader(self.val_batches)
+        return self._pacing_loader(self.train_cfg.val_batches)
 
     # PTL training methods
 
@@ -485,7 +485,7 @@ class ZstackSolver(pl.LightningModule):
         return loss
 
     def validation_step(self, batch: torch.Tensor, batch_idx: int) -> torch.Tensor:
-        generator = torch.Generator(device=self.device).manual_seed(self.val_seed + batch_idx)
+        generator = torch.Generator(device=self.device).manual_seed(self.train_cfg.val_seed + batch_idx)
         loss, predictions, targets, logs = self._forwards_common(generator=generator)
         self._log_stage("val", loss, logs)
         for name, value in self.val_metrics(predictions, targets).items():
@@ -667,6 +667,7 @@ class ZstackSolver_MixedDensity(ZstackSolver):
     def __init__(
             self,
             *,
+            train_cfg: TrainingConfig,
             sim_cfg: SimulationConfig,
             optics_cfg: OpticalConfig,
             phase_cfg: ZernikeConfig,
@@ -677,21 +678,13 @@ class ZstackSolver_MixedDensity(ZstackSolver):
             z_objective: Optional[torch.Tensor] = None,
             z_jitter: float = 0.0,
             noise_cfg: Optional[NoiseConfig] = None,
-            num_components: int = 4,
-            mixing_warmup_epochs: int = 0,
-            learning_rate: float = 1.0e-3,
-            weight_decay: float = 1.0e-3,
             hidden_channels: Sequence[int] = (16, 32),
             embedding_dims: int = 128,
-            batch_size: int = 32,
-            generator_chunk: int = 4,
-            steps_per_epoch: int = 200,
-            val_batches: int = 32,
-            val_seed: int = 42,
+            num_components: int = 4,
     ):
         self.num_components = num_components  # must come before decoder init
-        self.mixing_warmup_epochs = mixing_warmup_epochs
         super().__init__(
+            train_cfg=train_cfg,
             sim_cfg=sim_cfg,
             optics_cfg=optics_cfg,
             phase_cfg=phase_cfg,
@@ -702,15 +695,8 @@ class ZstackSolver_MixedDensity(ZstackSolver):
             z_jitter=z_jitter,
             object_distribution=object_distribution,
             noise_cfg=noise_cfg,
-            learning_rate=learning_rate,
-            weight_decay=weight_decay,
             hidden_channels=hidden_channels,
             embedding_dims=embedding_dims,
-            batch_size=batch_size,
-            generator_chunk=generator_chunk,
-            steps_per_epoch=steps_per_epoch,
-            val_batches=val_batches,
-            val_seed=val_seed,
         )
 
     def _setup_whitening(self) -> None:
@@ -810,7 +796,7 @@ class ZstackSolver_MixedDensity(ZstackSolver):
         are learned, so multimodal targets don't collapse too early.
         """
         logits = mixture.mixture_distribution.logits
-        if self.current_epoch < self.mixing_warmup_epochs:
+        if self.current_epoch < self.train_cfg.mixing_warmup_epochs:
             return torch.zeros_like(logits)
         return logits
 
