@@ -121,3 +121,77 @@ class CnnDecoder_DetachedHead(CnnDecoder):
         main_outputs = self.project(emb)
         detached_outputs = self.detached_head(emb.detach())
         return torch.cat([main_outputs, detached_outputs], dim=1)
+
+
+class _LinearBlock(nn.Module):
+    """
+    Pre-normalized linear block.
+
+    LayerNorm so it can be used in a flow matching model, where individual samples need to be traced.
+    """
+    def __init__(self, in_dims: int, out_dims: int):
+        super().__init__()
+        self.norm = nn.LayerNorm(in_dims)
+        self.linear = nn.Linear(in_dims, out_dims)
+        self.act = nn.GELU()
+
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        return self.act(self.linear(self.norm(x)))
+
+
+class _ResidualLinearBlock(nn.Module):
+    """
+    Pre-normalized residual linear block.
+
+    LayerNorm so it can be used in a flow matching model, where individual samples need to be traced.
+    """
+    def __init__(self, num_dims: int, res_dims: int):
+        super().__init__()
+        self.norm = nn.LayerNorm(num_dims)
+        self.linear1 = nn.Linear(num_dims, res_dims)
+        self.linear2 = nn.Linear(res_dims, num_dims)
+        self.act = nn.GELU()
+
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        res = self.linear1(self.norm(x))
+        res = self.act(res)
+        res = self.linear2(res)
+        return res + x
+
+
+class MLP(nn.Module):
+    """
+    MLP, optionally residual. If residual, hidden dimensions must all be equal.
+    Used to model a vector field for flow matching.
+
+    [B, Cin] -> [B, C1] -> [B, C2] -> ... -> [B, Cout]
+    """
+    def __init__(
+            self,
+            in_dims: int,
+            hidden_dims: Sequence[int],
+            out_dims: int,
+            is_residual: bool,
+            residual_dims: Optional[int] = None,
+    ):
+        super().__init__()
+
+        assert len(hidden_dims) > 1
+        if is_residual:
+            assert all([h == hidden_dims[0] for h in hidden_dims])  # residual MLP requires constant-size layers
+            assert residual_dims is not None
+
+        self.input = nn.Linear(in_dims, hidden_dims[0])
+
+        hidden = []
+        for cin, cout in zip(hidden_dims[:-1], hidden_dims[1:]):
+            if is_residual:
+                hidden.append(_ResidualLinearBlock(cin, residual_dims))
+            else:
+                hidden.append(_LinearBlock(cin, cout))
+        self.hidden = nn.Sequential(*hidden)
+
+        self.output = nn.Linear(hidden_dims[-1], out_dims)
+
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        return self.output(self.hidden(self.input(x)))
