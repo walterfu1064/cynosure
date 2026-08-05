@@ -239,9 +239,9 @@ class VelocityField(nn.Module):
     Conditional velocity field for flow matching in coefficient space.
 
     Encapculates three modules:
-    - encoder: CNN that encodes a z-stack into a conditioning vector `q`
+    - encoder: CNN that encodes a z-stack into a conditioning vector `y`
     - time_embed: Fourier embedding for the flow time `t`
-    - mlp: predicts `v(x_t, t | q)`
+    - mlp: predicts `v(x_t, t | y)`
     """
     def __init__(
             self,
@@ -281,25 +281,25 @@ class VelocityField(nn.Module):
         Arguments:
         - images: [B, Z, H, W] batched z-stacks (or batched single images)
         Returns:
-        - [B, E], referred to elsewhere as `q`
+        - [B, E], referred to elsewhere as `y`
         """
         return self.encoder(images)
 
-    def forward(self, x_t: torch.Tensor, t: torch.Tensor, q: torch.Tensor) -> torch.Tensor:
+    def forward(self, x_t: torch.Tensor, t: torch.Tensor, y: torch.Tensor) -> torch.Tensor:
         """
-        Takes the current point along the flow (x_t, t) and the conditioning vector q.
-        Sinusoidally embeds the flow time t, concatenates (x_t, t_emb, q), and passes
+        Takes the current point along the flow (x_t, t) and the conditioning vector y.
+        Sinusoidally embeds the flow time t, concatenates (x_t, t_emb, y), and passes
         them through the MLP to predict the output velocity.
 
-        In effect, outputs `v(x_t, t | q)`.
+        In effect, outputs `v(x_t, t | y)`.
 
         Arguments:
         - x_t: [B, N] current point along the flow
         - t: [B,] flow time, in [0, 1]
-        - q: [B, E] conditioning vector, from the encoded data
+        - y: [B, E] conditioning vector, from the encoded data
         Returns:
-        - [B, N] velocities
+        - [B, N] predicted velocities, `v(x_t, t | y)`
         """
         t_emb = self.time_embed(t)
-        emb = torch.cat([x_t, t_emb, q], dim=-1)
+        emb = torch.cat([x_t, t_emb, y], dim=-1)
         return self.mlp(emb)

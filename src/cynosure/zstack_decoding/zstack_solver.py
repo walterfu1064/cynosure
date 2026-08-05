@@ -38,6 +38,7 @@ from ..config import (
     ZernikeConfig,
 )
 from ..utilities.fft_utilities import convolve_psf_with_object
+from ..utilities.ode_solvers import EulerSolver, ODESolver
 from ..zernike import ZernikeProjector
 
 
@@ -871,3 +872,237 @@ class ZstackSolver_MixedDensity(ZstackSolver):
         means, logits, _ = self._split_predictions(self.forward(images))
         coefs = means * self.target_scales + self.target_means
         return logits.softmax(dim=1), coefs[..., :self.num_phase_coefs], coefs[..., self.num_phase_coefs:]
+
+
+class ZstackSolver_FlowMatching(ZstackSolver):
+    """
+    Extends ZstackSolver, training a conditional velocity field that transports a standard
+    normal into the posterior over aberration coefficients, given a z-stack.
+
+    Unlike the mixture model, the posterior is represented implicitly: there is no closed-form
+    density, only the ability to draw samples by integrating the learned ODE. In exchange the
+    training objective is a plain regression, so none of the mixture's failure modes
+    (collapsing weights, covariance-preconditioned mean gradients) apply.
+
+    The flow lives in *whitened* space over the non-piston coefficients only, where the
+    sampling prior is already close to a standard normal -- so the flow only has to sharpen
+    a roughly-correct prior rather than build the distribution from nothing.
+    """
+    def __init__(
+            self,
+            *,
+            train_cfg: TrainingConfig,
+            sim_cfg: SimulationConfig,
+            optics_cfg: OpticalConfig,
+            phase_cfg: ZernikeConfig,
+            amp_cfg: ZernikeConfig,
+            phase_prior_cfg: PriorConfig,
+            amp_prior_cfg: PriorConfig,
+            vel_cfg: VelocityConfig,
+            object_distribution: torch.Tensor,
+            z_objective: Optional[torch.Tensor] = None,
+            z_jitter: float = 0.0,
+            noise_cfg: Optional[NoiseConfig] = None,
+            num_val_samples: int = 64,
+            ode_solver: Optional[ODESolver] = None,
+            hidden_channels: Sequence[int] = (16, 32),
+            embedding_dims: int = 128,
+    ):
+        self.vel_cfg = vel_cfg  # must come before decoder init
+        super().__init__(
+            train_cfg=train_cfg,
+            sim_cfg=sim_cfg,
+            optics_cfg=optics_cfg,
+            phase_cfg=phase_cfg,
+            amp_cfg=amp_cfg,
+            phase_prior_cfg=phase_prior_cfg,
+            amp_prior_cfg=amp_prior_cfg,
+            z_objective=z_objective,
+            z_jitter=z_jitter,
+            object_distribution=object_distribution,
+            noise_cfg=noise_cfg,
+            hidden_channels=hidden_channels,
+            embedding_dims=embedding_dims,
+        )
+
+        self.num_val_samples = num_val_samples
+        if ode_solver is None:  # instantiate fresh, in case future solvers hold mutable state
+            ode_solver = EulerSolver()
+        self.ode_solver = ode_solver
+
+    @property
+    def flow_dims(self) -> int:
+        """Dimension the flow transports: the non-piston coefficients, in whitened space"""
+        return self.num_nonpiston_coefs
+
+    @property
+    def decoder_out_dims(self) -> int:
+        raise NotImplementedError("ZstackSolver_FlowMatching does not use `decoder_out_dims`")
+
+    def _setup_decoder(
+            self,
+            hidden_channels: Sequence[int],
+            embedding_dims: int,
+    ) -> nn.Module:
+        """Sets up the conditional velocity field"""
+        return VelocityField(
+            in_channels=self.num_z,
+            spatial_hidden_channels=hidden_channels,
+            image_embedding_dims=embedding_dims,
+            spatial_size=self.sim_cfg.object_grid_size,
+            flow_dims=self.flow_dims,
+            time_embedding_dims=self.vel_cfg.time_embedding_dims,
+            hidden_dims=self.vel_cfg.hidden_dims,
+            is_residual=self.vel_cfg.is_residual,
+            residual_dims=self.vel_cfg.residual_dims,
+        )
+
+    # Whitened-space bookkeeping
+
+    def forward(self, images: torch.Tensor) -> torch.Tensor:
+        """
+        Encodes a [B, num_z, H, W] batch of z-stacks as [B, embedding_dims] conditioning vectors.
+
+        Note: unlike the rest of the ZstackSolver family, this is not a coefficient estimate.
+        Inferring the aberration coefficients requires flow integration (see `sample`).
+        """
+        return self.decoder.encode(images)
+
+    def _gather_nonpiston(self, targets: torch.Tensor) -> torch.Tensor:
+        """Selects the [B, N_kept] flow-space coordinates out of [B, N_tot] whitened targets"""
+        return targets[:, ~self.is_piston]
+
+    # Flow matching
+
+    def sample_flow_pairs(
+            self,
+            x_1: torch.Tensor,
+            generator: Optional[torch.Generator] = None,
+    ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
+        """
+        Draws conditional-optimal-transport training pairs for a [B, N_kept] batch of whitened targets.
+
+        Arguments:
+        - x_1: [B, N_kept] flow-space targets (the data end of the path)
+        Returns:
+        - x_t: [B, N_kept] points along the straight path
+        - t: [B,] flow times, uniform on [0, 1]
+        - u_t: [B, N_kept] target velocities
+        """
+        batch_size = x_1.shape[0]
+        kwargs = dict(generator=generator, dtype=x_1.dtype, device=x_1.device)
+
+        x_0 = torch.randn(x_1.shape, **kwargs)  # noise end of the path
+        t = torch.rand(batch_size, **kwargs)
+
+        x_t = torch.lerp(x_0, x_1, t.unsqueeze(-1))  # (1 - t) * x_0 + t * x_1
+        u_t = x_1 - x_0  # conditional-optimal-transport velocity (constant along the path)
+
+        return x_t, t, u_t
+
+    def flow_loss(
+            self,
+            y: torch.Tensor,
+            targets: torch.Tensor,
+            generator: Optional[torch.Generator] = None,
+    ) -> tuple[torch.Tensor, dict]:
+        """
+        Calculates the conditional flow-matching loss as the MSE between predicted and target velocities.
+        Returns the total loss and a dict of individual losses, matching `super().compute_losses`.
+        """
+        non_piston_targets = self._gather_nonpiston(targets)
+        x_t, t, u_t = self.sample_flow_pairs(non_piston_targets, generator)
+        v_t = self.decoder(x_t, t, y)
+        cfm_loss = F.mse_loss(v_t, u_t)
+        return cfm_loss, {"cfm_loss": cfm_loss}
+
+    def compute_losses(
+            self,
+            predictions: torch.Tensor,
+            targets: torch.Tensor,
+    ) -> tuple[torch.Tensor, dict]:
+        """Unseeded passthrough to `flow_loss`, for compatibility with the base class"""
+        return self.flow_loss(predictions, targets)
+
+    def _forwards_common(
+            self,
+            generator: Optional[torch.Generator] = None,
+    ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor, dict]:
+        """
+        As the base class, but threads `generator` into the loss as well as the data
+        generation, since the flow objective samples x_0 and t on top of the training pair.
+        The second return slot carries the conditioning vectors rather than predictions.
+        """
+        images, phase_coefs, amp_coefs = self.create_examples(self.batch_size, generator=generator)
+        targets = self.whiten_targets(phase_coefs, amp_coefs)
+        y = self.forward(images)
+        loss, logs = self.flow_loss(y, targets, generator=generator)
+        return loss, y, targets, logs
+
+    # Sampling and inference
+
+    @torch.no_grad()
+    def sample(
+            self,
+            y: torch.Tensor,
+            num_samples: int = 1,
+            num_steps: Optional[int] = None,
+            generator: Optional[torch.Generator] = None,
+    ) -> torch.Tensor:
+        """
+        Draws posterior samples by integrating the velocity field from t=0 to t=1.
+
+        Arguments:
+        - y: [B, embedding_dims] conditioning vectors from `forward`
+        - num_samples: S, posterior samples to draw per conditioning vector
+        - num_steps: integration steps to take, defaulting to `vel_cfg.num_sample_steps`
+        Returns:
+        - [B, S, N_kept] whitened flow-space samples
+        """
+        if num_steps is None:
+            num_steps = self.vel_cfg.num_sample_steps
+
+        batch_size = y.shape[0]
+        y_expanded = y.repeat_interleave(num_samples, dim=0)
+
+        x_0 = torch.randn(
+            batch_size * num_samples,
+            self.flow_dims,
+            generator=generator,
+            dtype=y.dtype,
+            device=y.device,
+        )  # same prior the training pairs start from
+
+        def velocity(x: torch.Tensor, t: float) -> torch.Tensor:
+            """Expands scalar t to batch, to keep the ODESolver call clean"""
+            t_batch = torch.full((x.shape[0],), t, dtype=x.dtype, device=x.device)
+            return self.decoder(x, t_batch, y_expanded)
+
+        x_1 = self.ode_solver.integrate(velocity, x_0, num_steps)
+        return x_1.reshape(batch_size, num_samples, self.flow_dims)
+
+    def predicted_means(self, predictions: torch.Tensor) -> torch.Tensor:
+        """
+        Whitened point estimate, as the mean over posterior samples.
+        Is a mean even meaningful (heh), if the posterior distribution might be multimodal?
+        Might have to rethink this.
+        """
+        raise NotImplementedError
+
+    def predict_samples(
+            self,
+            images: torch.Tensor,
+            num_samples: int = 1,
+    ) -> tuple[torch.Tensor, torch.Tensor]:
+        """
+        Draws physical-space posterior samples from a [B, num_z, H, W] batch of z-stacks.
+        Similar to `predict_component_coefficients` in other classes.
+        Should return phase and amp coefficients, each shaped like [B, num-samples, num_coefs].
+        """
+        raise NotImplementedError
+
+    def val_metrics(self, predictions: torch.Tensor, targets: torch.Tensor) -> dict:
+        """
+        TODO - need to rethink how to do these, not sure the previous implementations still make sense
+        """
+        raise NotImplementedError
