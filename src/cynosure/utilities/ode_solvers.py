@@ -9,17 +9,20 @@ from collections.abc import Callable
 import torch
 
 
+VelocityFn = Callable[[torch.Tensor, float], torch.Tensor]  # (x, t) -> dx/dt
+
+
 class ODESolver(ABC):
     """Base class for fixed-step explicit integrators"""
 
     @abstractmethod
-    def step(self, velocity: Callable, x: torch.Tensor, t: float, dt: float) -> torch.Tensor:
+    def step(self, velocity: VelocityFn, x: torch.Tensor, t: float, dt: float) -> torch.Tensor:
         """Advances x(t) -> x(t + dt)"""
         ...
 
     def integrate(
             self,
-            velocity: Callable,
+            velocity: VelocityFn,
             x_0: torch.Tensor,
             num_steps: int,
             t_start: float = 0.0,
@@ -40,5 +43,5 @@ class EulerSolver(ODESolver):
     Ye Olde Basic Euler Integrator.
     x[n+1] = x[n] + dt * v(x_n, t_n)
     """
-    def step(self, velocity: Callable, x: torch.Tensor, t: float, dt: float) -> torch.Tensor:
+    def step(self, velocity: VelocityFn, x: torch.Tensor, t: float, dt: float) -> torch.Tensor:
         return x + dt * velocity(x, t)
