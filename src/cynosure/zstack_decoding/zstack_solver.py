@@ -354,7 +354,7 @@ class ZstackSolver(pl.LightningModule):
         )
         return phase_coefs, amp_coefs
 
-    def _simulate_stacks(
+    def simulate_stacks(
             self,
             z: torch.Tensor,
             phase_coefs: torch.Tensor,
@@ -415,7 +415,7 @@ class ZstackSolver(pl.LightningModule):
             z = z + offsets.unsqueeze(1)
         return self.propagator.defocus_from_objective_z(z)
 
-    def _apply_noise(
+    def apply_noise(
             self,
             images: torch.Tensor,
             generator: Optional[torch.Generator] = None
@@ -443,9 +443,9 @@ class ZstackSolver(pl.LightningModule):
         """
         with torch.no_grad():
             z = self._batched_defocus(phase_coefs.shape[0], offsets=offsets)
-            images = self._simulate_stacks(z, phase_coefs, amp_coefs)
+            images = self.simulate_stacks(z, phase_coefs, amp_coefs)
             if with_noise:
-                images = self._apply_noise(images, generator)
+                images = self.apply_noise(images, generator)
             return self.normalize_stack(images).float()
 
     def create_examples(

@@ -18,6 +18,8 @@
           Trains under a jittered focus position, and resolves the resulting bimodal posterior.
    5. [`zstack_decoding/example_2e.ipynb`](zstack_decoding/example_2e.ipynb) - Estimation of the same
           single-image posterior by flow matching, sampled by integrating the learned velocity field.
+3. [`information_theory`](information_theory/) - Sandbox for exploring
+          the information content in aberrated images as probed using the aforementioned models. 
 
 ## Data
 
