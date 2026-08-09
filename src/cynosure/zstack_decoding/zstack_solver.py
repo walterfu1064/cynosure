@@ -186,7 +186,7 @@ class ZstackSolver(pl.LightningModule):
 
     @property
     def num_nonpiston_amp_coefs(self) -> int:
-        """Number of non-piston phase coefficients"""
+        """Number of non-piston amplitude coefficients"""
         return int((~self.is_amp_piston).sum())
 
     @property
