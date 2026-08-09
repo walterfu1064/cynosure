@@ -4,4 +4,4 @@ from .zernike_polynomials import (
     get_radial_term,
     get_angular_term,
 )
-from .zernike_projector import ZernikeConfig, ZernikeProjector
+from .zernike_projector import ZernikeConfig, ZernikeProjector, format_zernike_names

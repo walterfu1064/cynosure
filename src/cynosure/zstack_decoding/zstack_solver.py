@@ -105,16 +105,6 @@ class ZstackSolver(pl.LightningModule):
 
         self.register_buffer("object_distribution", object_distribution.to(self.ftype))
 
-    @property
-    def batch_size(self) -> int:
-        """Convenience accessor because we call it often, other params should be accessed via `self.train_cfg`"""
-        return self.train_cfg.batch_size
-
-    @property
-    def decoder_out_dims(self) -> int:
-        """Number of decoder output dims, may be overridden by child classes that predict additional parameters"""
-        return self.num_phase_coefs + self.num_amp_coefs
-
     def _setup_decoder(
             self,
             hidden_channels: Sequence[int],
@@ -158,6 +148,18 @@ class ZstackSolver(pl.LightningModule):
         return predictions
 
     @property
+    def batch_size(self) -> int:
+        """Convenience accessor because we call it often, other params should be accessed via `self.train_cfg`"""
+        return self.train_cfg.batch_size
+
+    @property
+    def decoder_out_dims(self) -> int:
+        """Number of decoder output dims, may be overridden by child classes that predict additional parameters"""
+        return self.num_phase_coefs + self.num_amp_coefs
+
+    # Coefficient bookkeeping
+
+    @property
     def num_phase_coefs(self) -> int:
         """Convenience pass-through"""
         return self.propagator.num_phase_coefs
@@ -176,6 +178,48 @@ class ZstackSolver(pl.LightningModule):
     def num_nonpiston_coefs(self) -> int:
         """Number of non-piston coefficients modeled"""
         return int((~self.is_piston).sum())
+
+    @property
+    def num_nonpiston_phase_coefs(self) -> int:
+        """Number of non-piston phase coefficients, i.e. where `nonpiston_labels` switches Z -> A"""
+        return int((~self.is_phase_piston).sum())
+
+    @property
+    def num_nonpiston_amp_coefs(self) -> int:
+        """Number of non-piston phase coefficients"""
+        return int((~self.is_amp_piston).sum())
+
+    @property
+    def coefficient_labels(self) -> list[str]:
+        """Zernike coef labels for all [N_tot,] coefficients, phase then amp: [`Z_n^m`, ..., `A_n^m`, ...]"""
+        return (self.propagator.phase_projector.format_labels("Z")
+                + self.propagator.amp_projector.format_labels("A"))
+
+    @property
+    def nonpiston_labels(self) -> list[str]:
+        """`coefficient_labels`, restricted to the [N_kept,] non-piston coefficients"""
+        return [label for label, piston in zip(self.coefficient_labels, self.is_piston.tolist()) if not piston]
+
+    def join_phase_amp(self, phase_coefs: torch.Tensor, amp_coefs: torch.Tensor) -> torch.Tensor:
+        """Cats [..., num_phase] and [..., num_amp] coefs into [..., N_tot]"""
+        return torch.cat([phase_coefs, amp_coefs], dim=-1)
+
+    def split_phase_amp(self, coefs: torch.Tensor) -> tuple[torch.Tensor, torch.Tensor]:
+        """Splits a [..., N_tot] tensor into its phase and amplitude parts"""
+        return coefs[..., :self.num_phase_coefs], coefs[..., self.num_phase_coefs:]
+
+    def gather_nonpiston(self, coefs: torch.Tensor) -> torch.Tensor:
+        """Selects the [..., N_kept] non-piston coefficients of the full [..., N_tot]"""
+        return coefs[..., ~self.is_piston]
+
+    def scatter_nonpiston(self, kept_coefs: torch.Tensor) -> torch.Tensor:
+        """
+        Scatters [..., N_kept] non-piston coefficients back into a full [..., N_tot] whitened vector.
+        The "whitened" part is important, since it means the piston slots can be left at zero.
+        """
+        coefs = kept_coefs.new_zeros(*kept_coefs.shape[:-1], self.num_coefs)
+        coefs[..., ~self.is_piston] = kept_coefs
+        return coefs
 
     def _setup_piston_flags(self) -> None:
         """
@@ -241,15 +285,11 @@ class ZstackSolver(pl.LightningModule):
 
     def whiten_targets(self, phase_coefs: torch.Tensor, amp_coefs: torch.Tensor) -> torch.Tensor:
         """Whitens the [B, N] labels and cats them into a [B, N_tot] regression target"""
-        coefs = torch.cat([phase_coefs, amp_coefs], dim=1)
+        coefs = self.join_phase_amp(phase_coefs, amp_coefs)
         return ((coefs - self.target_means) / self.target_scales).float()
 
-    def split_phase_amp(self, coefs: torch.Tensor) -> tuple[torch.Tensor, torch.Tensor]:
-        """Splits a [B, num_phase+num_amp] tensor into its phase and amplitude parts"""
-        return coefs[:, :self.num_phase_coefs], coefs[:, self.num_phase_coefs:]
-
     def unwhiten_predictions(self, means: torch.Tensor) -> tuple[torch.Tensor, torch.Tensor]:
-        """Unwhitens [B, N_tot] point estimates back into physical (phase, amp) coefs"""
+        """Unwhitens [..., N_tot] point estimates back into physical (phase, amp) coefs"""
         coefs = means * self.target_scales + self.target_means
         return self.split_phase_amp(coefs)
 
@@ -971,16 +1011,6 @@ class ZstackSolver_FlowMatching(ZstackSolver):
         """
         return self.decoder.encode(images)
 
-    def _gather_nonpiston(self, targets: torch.Tensor) -> torch.Tensor:
-        """Selects the [B, N_kept] flow-space coordinates out of [B, N_tot] whitened targets"""
-        return targets[:, ~self.is_piston]
-
-    def _scatter_nonpiston(self, flow_coords: torch.Tensor) -> torch.Tensor:
-        """Scatters the [B, N_kept] flow-space coordinates back to a full [B, N_tot] whitened coefs"""
-        coefs = flow_coords.new_zeros(*flow_coords.shape[:-1], self.num_coefs)
-        coefs[..., ~self.is_piston] = flow_coords
-        return coefs
-
     # Flow matching
 
     def sample_flow_pairs(
@@ -1019,8 +1049,8 @@ class ZstackSolver_FlowMatching(ZstackSolver):
         Calculates the conditional flow-matching loss as the MSE between predicted and target velocities.
         Returns the total loss and a dict of individual losses, matching `super().compute_losses`.
         """
-        non_piston_targets = self._gather_nonpiston(targets)
-        x_t, t, u_t = self.sample_flow_pairs(non_piston_targets, generator)
+        x_1 = self.gather_nonpiston(targets)
+        x_t, t, u_t = self.sample_flow_pairs(x_1, generator)
         v_t = self.decoder(x_t, t, y)
         cfm_loss = F.mse_loss(v_t, u_t)
         return cfm_loss, {"cfm_loss": cfm_loss}
@@ -1099,7 +1129,7 @@ class ZstackSolver_FlowMatching(ZstackSolver):
         Judge multimodal systems by `best_sample_rmse` instead.
         """
         samples = self.sample(predictions, num_samples=self.num_val_samples)
-        return self._scatter_nonpiston(samples.mean(dim=1))
+        return self.scatter_nonpiston(samples.mean(dim=1))
 
     def predict_samples(
             self,
@@ -1116,10 +1146,7 @@ class ZstackSolver_FlowMatching(ZstackSolver):
         """
         y = self.forward(images)
         x_1 = self.sample(y, num_samples=num_samples)
-        coefs = self._scatter_nonpiston(x_1) * self.target_scales + self.target_means
-        phase_coefs = coefs[..., :self.num_phase_coefs]
-        amp_coefs = coefs[..., self.num_phase_coefs:]
-        return phase_coefs, amp_coefs
+        return self.unwhiten_predictions(self.scatter_nonpiston(x_1))
 
     def val_metrics(self, predictions: torch.Tensor, targets: torch.Tensor) -> dict:
         """
@@ -1137,9 +1164,9 @@ class ZstackSolver_FlowMatching(ZstackSolver):
         the random sampling. Could reseed the RNG I guess, but it's probably fine.
         """
         samples = self.sample(predictions, num_samples=self.num_val_samples)  # [B, num_samples, N_kept]
-        targets_kept = self._gather_nonpiston(targets).unsqueeze(1)  # [B, 1, N_kept]
+        targets_kept = self.gather_nonpiston(targets).unsqueeze(1)  # [B, 1, N_kept]
 
-        _, amp = self.split_phase_amp(self._scatter_nonpiston(samples.mean(dim=1)))
+        _, amp = self.split_phase_amp(self.scatter_nonpiston(samples.mean(dim=1)))
         _, amp_targets = self.split_phase_amp(targets)
         metrics = {"amp_rmse_whitened": F.mse_loss(amp, amp_targets).sqrt()}
 

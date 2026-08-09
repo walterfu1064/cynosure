@@ -1,8 +1,21 @@
+from typing import Union
+
+import numpy as np
 import torch
 import torch.nn as nn
 
 from .zernike_polynomials import generate_zernike_polynomial, get_noll_index
 from ..config import ZernikeConfig
+
+
+def format_zernike_names(nm_indices: Union[np.ndarray, torch.Tensor], symbol: str = "Z") -> list[str]:
+    """Takes a [N, 2] array/tensor of Zernike indices and formats them as `Z_n^m` (or some other symbol)"""
+    if isinstance(nm_indices, torch.Tensor):
+        nm_indices = nm_indices.numpy(force=True)
+    if not isinstance(nm_indices, np.ndarray):
+        nm_indices = np.asarray(nm_indices)
+    nm_list = nm_indices.astype(np.int64).tolist()
+    return [r"$%s_{%d}^{%d}$" % (symbol, n, m) for n, m in nm_list]
 
 
 class ZernikeProjector(nn.Module):
@@ -49,6 +62,10 @@ class ZernikeProjector(nn.Module):
             f"Zernike bank has {zernike_bank.shape[0]} elements; config says {zernike_cfg.num_elements}"
         )  # defensive
         self.num_elements = zernike_cfg.num_elements
+
+    def format_labels(self, symbol: str = "Z") -> list[str]:
+        """Plot-ready `symbol_n^m` labels for this projector's coefficients, in Noll order"""
+        return format_zernike_names(self.nm_indices, symbol)
 
     def project(self, coefficients: torch.Tensor) -> torch.Tensor:
         """

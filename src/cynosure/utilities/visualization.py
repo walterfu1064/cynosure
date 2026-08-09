@@ -1,20 +1,10 @@
-from typing import Optional, Union
+from typing import Optional
 
 import numpy as np
 import matplotlib.pyplot as pyplot
 import torch
 
 from ..beam_propagation.beam_propagator import BeamPropagator
-
-
-def format_zernike_names(nm_indices: Union[np.ndarray, torch.Tensor], symbol: str = "Z") -> list[str]:
-    """Takes a [N, 2] array/tensor of Zernike indices and formats them as `Z_n^m` (or some other symbol)"""
-    if isinstance(nm_indices, torch.Tensor):
-        nm_indices = nm_indices.numpy(force=True)
-    if not isinstance(nm_indices, np.ndarray):
-        nm_indices = np.asarray(nm_indices)
-    nm_list = nm_indices.astype(np.int64).tolist()
-    return [r"$%s_{%d}^{%d}$" % (symbol, n, m) for n, m in nm_list]
 
 
 def plot_stack(stack: np.ndarray, panel_size: float = 3):
