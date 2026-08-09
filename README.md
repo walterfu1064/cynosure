@@ -5,6 +5,19 @@
 
 Microscopy beam propagation and optical aberration modeling using Debye-Wolf theory and machine learning.
 
+A fully differentiable, GPU-accelerated PyTorch implementation of high-NA point spread function
+formation, wrapped in models that run it backwards to recover Zernike aberration coefficients from images.
+
+Two routes are provided: classical phase retrieval by gradient descent on a single z-stack, and a variety of
+amortized simulation-based inference approaches, where a CNN-based decoder trained on synthetic data infers
+the full posterior distribution over the aberrations without any per-image optimization.
+
+The project is managed with [uv](https://docs.astral.sh/uv/), so `uv sync` will set up the environment,
+`uv run pytest` will run the test suite, and `uv run jupyter lab` will open the worked examples in
+[`examples/`](examples/README.md). CUDA is used when available. Otherwise, everything also runs on CPU.
+Slowly.
+
+
 ### Forward model
 
 The core is a fully differentiable beam propagation module that takes a wavefront at a microscope
@@ -29,18 +42,24 @@ so the fit is directly interpretable as the Seidel aberrations (defocus, astigma
 
 **Amortized inference (learned decoder).** For a given optical system, the forward model doubles as a simulator,
 allowing a decoder (a CNN, e.g.) to be trained on synthetic (image, coefficient) pairs generated on the fly.
-As an amortized simulation-based inference approach, once the expensive training is done, the decoder can subsequently
-predict aberration coefficients in a single pass on image data from the asme optical system.
+As an amortized simulation-based inference approach, once the expensive training is done, aberration coefficients
+can subsequently be inferred from new images of the same optical system without any further optimization.
 
 Several decoders are implemented, which model the posterior in increasingly thorough ways:
 - **Point estimate.** Just the conditional means of the aberration coefficients.
 - **Heteroscedastic.** A separate mean and variance for each coefficient (i.e., a diagonal Gaussian posterior).
 - **Full covariance.** Cholesky factor of a joint Gaussian, capturing the pairwise covariances among the coefficients.
 - **Mixture density.** A Gaussian mixture over the coefficients, which can also represent multimodality.
+- **Flow matching.** A conditional velocity field transporting a standard normal prior onto the . Integrate at
+inference time to draw samples. Allows unrestricted posterior forms at the cost of a closed-form density.
 
 The same machinery can be used to train on either full z-stacks or on single-z images. For the former, the
 relative z-positions of the z-stack should be given. For the latter, a z-jitter parameter defines the span of
 z-positions generatively modeled, which should match the z-range one hopes to decode.
+
+Single images are the harder regime, and the one that motivates the richer posteriors above. In particular, a
+single image admits an exact discrete degeneracy (i.e., jointly mirroring over the even-n phase terms and the
+odd-n amplitude terms), which requires a decoder that can model bimodal posteriors.
 
 Worked examples of all of the above are in [`examples/`](examples/README.md).
 
@@ -54,6 +73,8 @@ Worked examples of all of the above are in [`examples/`](examples/README.md).
 - Where applicable, Zernike coefficients are drawn from a prior that decays as a power of the radial order.
   This is a convenience, not something based in any underlying physics. During training, regression targets
   are whitened against this decay to keep them of magnitude order 1.
+- Each solver is a self-contained PyTorch Lightning module holding both its simulator and its decoder, and
+  synthesizes its own training and (seeded) validation data as it goes. No dataset is stored on disk.
 - Simulation and physical parameters are defined using a set of config dataclasses. Dimensional parameters
   such as the wavelength or focal length may be passed in any units as long as they are mutually consistent.
   It is assumed that the user won't make a silly choice that tanks numerical stability.

@@ -1,7 +1,7 @@
     [project]
     name = "cynosure"
     version = "0.1.0"
-    description = "PyTorch-based tools for simulating optical aberrations in high-NA imaging systems"
+    description = "Differentiable high-NA PSF modeling and Zernike aberration retrieval in PyTorch. Classical phase retrieval and amortized simulation-based inference."
     readme = "README.md"
     requires-python = ">=3.14"
     dependencies = [
