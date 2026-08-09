@@ -965,12 +965,21 @@ class ZstackSolver_FlowMatching(ZstackSolver):
 
         Note: unlike the rest of the ZstackSolver family, this is not a coefficient estimate.
         Inferring the aberration coefficients requires flow integration (see `sample`).
+
+        Follows the theory laid out in Lipman et al., "Flow matching for generative
+        modeling," arXiv:2210.02747v2 (2023).
         """
         return self.decoder.encode(images)
 
     def _gather_nonpiston(self, targets: torch.Tensor) -> torch.Tensor:
         """Selects the [B, N_kept] flow-space coordinates out of [B, N_tot] whitened targets"""
         return targets[:, ~self.is_piston]
+
+    def _scatter_nonpiston(self, flow_coords: torch.Tensor) -> torch.Tensor:
+        """Scatters the [B, N_kept] flow-space coordinates back to a full [B, N_tot] whitened coefs"""
+        coefs = flow_coords.new_zeros(*flow_coords.shape[:-1], self.num_coefs)
+        coefs[..., ~self.is_piston] = flow_coords
+        return coefs
 
     # Flow matching
 
@@ -1054,10 +1063,10 @@ class ZstackSolver_FlowMatching(ZstackSolver):
 
         Arguments:
         - y: [B, embedding_dims] conditioning vectors from `forward`
-        - num_samples: S, posterior samples to draw per conditioning vector
+        - num_samples: posterior samples to draw per conditioning vector
         - num_steps: integration steps to take, defaulting to `vel_cfg.num_sample_steps`
         Returns:
-        - [B, S, N_kept] whitened flow-space samples
+        - [B, num_samples, N_kept] whitened flow-space samples
         """
         if num_steps is None:
             num_steps = self.vel_cfg.num_sample_steps
@@ -1083,11 +1092,14 @@ class ZstackSolver_FlowMatching(ZstackSolver):
 
     def predicted_means(self, predictions: torch.Tensor) -> torch.Tensor:
         """
-        Whitened point estimate, as the mean over posterior samples.
-        Is a mean even meaningful (heh), if the posterior distribution might be multimodal?
-        Might have to rethink this.
+        Whitened point estimate, as the mean over `num_val_samples` posterior samples.
+        Scattered back to full [B, N_tot] width, so the inherited `predict_coefficients` works.
+
+        This isn't terribly meaningful if the posterior distribution is multimodal.
+        Judge multimodal systems by `best_sample_rmse` instead.
         """
-        raise NotImplementedError
+        samples = self.sample(predictions, num_samples=self.num_val_samples)
+        return self._scatter_nonpiston(samples.mean(dim=1))
 
     def predict_samples(
             self,
@@ -1096,13 +1108,49 @@ class ZstackSolver_FlowMatching(ZstackSolver):
     ) -> tuple[torch.Tensor, torch.Tensor]:
         """
         Draws physical-space posterior samples from a [B, num_z, H, W] batch of z-stacks.
-        Similar to `predict_component_coefficients` in other classes.
-        Should return phase and amp coefficients, each shaped like [B, num-samples, num_coefs].
+        Comparable to `predict_component_coefficients` in other ZstackSolver classes.
+
+        Returns:
+        - phase_coefs: [B, num_samples, num_phase_coefs]
+        - amp_coefs: [B, num_samples, num_amp_coefs]
         """
-        raise NotImplementedError
+        y = self.forward(images)
+        x_1 = self.sample(y, num_samples=num_samples)
+        coefs = self._scatter_nonpiston(x_1) * self.target_scales + self.target_means
+        phase_coefs = coefs[..., :self.num_phase_coefs]
+        amp_coefs = coefs[..., self.num_phase_coefs:]
+        return phase_coefs, amp_coefs
 
     def val_metrics(self, predictions: torch.Tensor, targets: torch.Tensor) -> dict:
         """
-        TODO - need to rethink how to do these, not sure the previous implementations still make sense
+        Validation-only scalars for logging.
+
+        Samples from the predicted posterior distributions, then reports
+        statistics comparing those distributions to the targets.
+
+        Also compares the truth to the sampled distribution by ordering them, then mapping
+        the rankings to [0, 1]. If the truth belongs in the distrib, it's equally likely
+        to be in any rank, so the distribution of rankings should be uniform. Compare the
+        stdev to that of a uniform distribution to check calibration.
+
+        Compared to other ZstackSolver classes, these metrics carry some noise from
+        the random sampling. Could reseed the RNG I guess, but it's probably fine.
         """
-        raise NotImplementedError
+        samples = self.sample(predictions, num_samples=self.num_val_samples)  # [B, num_samples, N_kept]
+        targets_kept = self._gather_nonpiston(targets).unsqueeze(1)  # [B, 1, N_kept]
+
+        _, amp = self.split_phase_amp(self._scatter_nonpiston(samples.mean(dim=1)))
+        _, amp_targets = self.split_phase_amp(targets)
+        metrics = {"amp_rmse_whitened": F.mse_loss(amp, amp_targets).sqrt()}
+
+        sample_mse = (samples - targets_kept).square().mean(dim=2)  # [B, num_samples]
+        metrics["best_sample_rmse"] = sample_mse.amin(dim=1).mean().sqrt()  # cf. best_component_rmse
+        metrics["sample_mean_rmse"] = (samples.mean(dim=1) - targets_kept.squeeze(1)).square().mean().sqrt()
+        metrics["sample_spread"] = samples.std(dim=1).mean()  # ~0 if flow collapsed to a deterministic map
+
+        ranks = (samples < targets_kept).sum(dim=1) / self.num_val_samples  # [B, N_kept], in [0, 1]
+        num_ranks = self.num_val_samples + 1
+        uniform_std = math.sqrt((num_ranks**2 - 1) / 12) / self.num_val_samples
+        metrics["rank_std"] = ranks.std() / uniform_std  # ~1 when spread is calibrated
+
+        return metrics
