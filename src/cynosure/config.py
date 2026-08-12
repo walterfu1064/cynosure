@@ -6,6 +6,7 @@ must all be identical (and must also be shared by the z-positions), but are arbi
 within that constraint.
 """
 
+import math
 from dataclasses import dataclass, field
 from typing import Literal, Sequence
 
@@ -91,7 +92,7 @@ class NoiseConfig:
     Noise model to be applied to clean, simulated images.
 
     To each z-stack will be added:
-    - a total signal photons sampled log-uniformly from [min_photons, max_photons]
+    - a per-frame signal photon count sampled log-uniformly from [min_photons, max_photons]
     - a flat background sampled uniformly from [0, max-background]
     - Poisson shot noise based on the signal + background
     - Gaussian read noise with rms `read_noise`
@@ -100,6 +101,16 @@ class NoiseConfig:
     max_photons: float
     max_background: float
     read_noise: float
+
+    @property
+    def average_photons(self) -> float:
+        """Log-mean number of photons per frame, for a deterministic scale"""
+        return math.sqrt(self.max_photons * self.min_photons)
+
+    @property
+    def average_background(self) -> float:
+        """Mean background, for a deterministic scale"""
+        return self.max_background / 2
 
 
 @dataclass(frozen=True, slots=True)

@@ -297,7 +297,7 @@ class ZstackSolver(pl.LightningModule):
 
     @staticmethod
     def normalize_stack(images: torch.Tensor) -> torch.Tensor:
-        """Roughly normalizes a [..., H, W] image stack"""
+        """Roughly normalizes a [..., H, W] image stack per-plane/-batch element"""
         images = images - images.amin((-2, -1), keepdim=True)
         sums = images.sum((-2, -1), keepdim=True)
         return images / sums
@@ -361,9 +361,31 @@ class ZstackSolver(pl.LightningModule):
             amp_coefs: torch.Tensor,
     ) -> torch.Tensor:
         """
-        Forwards-simulates [B, num_z, H, W] z-stacks from [B, num_z] defocus values
-        and [B, N] aberration coefficients. Propagation happens in chunks to bound memory use.
+        Forwards-simulates a z-stack (or a batch of such) from the given defocus values and aberrations.
+        Propagation happens in chunks to bound memory use.
+
+        The trailing dimension of `z` is taken to be the z-stack size, which must match `self.num_z`.
+        In general, `z` should be [B, Z] (with singlet dimensions as needed). A one-dimensional [B,]
+        is only accepted when `self.num_z` is 1.
+
+        This is all a consequence of BeamPropagator not differentiating between batches, z-stacks,
+        and batches of z-stacks, instead folding all non-spatial dimensions into the batch dimension.
+
+        Arguments:
+        - z: defocus values from `defocus_from_objective_z`, either [B,] or [B, Z]
+        - phase_coefs: phase coefficients, [B, N_phase]
+        - amp_coefs: amplitude coefficients, [B, N_amp]
         """
+        if z.ndim == 1 and self.num_z == 1:
+            z = z.unsqueeze(-1)  # [B,] -> [B, 1]
+        if z.ndim != 2 or z.shape[-1] != self.num_z:
+            raise ValueError(f"`z` must be [B, num_z] with num_z = {self.num_z}, got {tuple(z.shape)}")
+        if not phase_coefs.shape[0] == amp_coefs.shape[0] == z.shape[0]:
+            raise ValueError(
+                "Got different batch dims for `z`, `phase_coefs`, and `amp_coefs`: "
+                f"{z.shape[0]}, {phase_coefs.shape[0]}, {amp_coefs.shape[0]}"
+            )
+
         batch_size = z.shape[0]
         chunk_size = self.train_cfg.generator_chunk or batch_size
         image_chunks = []
@@ -420,7 +442,13 @@ class ZstackSolver(pl.LightningModule):
             images: torch.Tensor,
             generator: Optional[torch.Generator] = None
     ) -> torch.Tensor:
-        """Adds nosie to the image stack"""
+        """
+        Adds noise to a [..., Z, H, W] image stack.
+
+        `noise_cfg`'s photon count and background are both per-frame, so the trailing
+        dims of `images` must be z-stack-shaped, [..., Z, H, W]. Use a singlet
+        z-dimension [..., 1, H, W] if necessary.
+        """
         if self.noise_model:
             return self.noise_model(images, generator=generator)
         return images
