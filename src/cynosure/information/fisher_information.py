@@ -1,6 +1,7 @@
 import math
 from typing import Optional
 
+import numpy as np
 import torch
 
 from cynosure.zstack_decoding import ZstackSolver
@@ -80,7 +81,7 @@ def calculate_fisher_matrix(
         background: Optional[float] = None,
 ) -> tuple[torch.Tensor, torch.Tensor]:
     """
-    Fisher matrix of the simulated z-stack with respect to the non-piston aberration coefficients.
+    Fisher matrix of a simulated z-stack with respect to the non-piston aberration coefficients.
 
     Arguments:
     - coefs: [C_kept,], the free (non-piston) coefficients, as from `ZstackSolver.gather_nonpiston()`
@@ -90,12 +91,49 @@ def calculate_fisher_matrix(
     - simulated z-stack, [Z, H, W]
     - Fisher matrix, [Z, C_kept, C_kept]
     """
-    if photons is None:
-        photons = solver.noise_cfg.average_photons
-    if background is None:
-        background = solver.noise_cfg.average_background
+    if solver.noise_cfg:
+        noise_defaults = {
+            "photons": solver.noise_cfg.average_photons,
+            "background": solver.noise_cfg.average_background,
+            "read": solver.noise_cfg.read_noise,
+        }
+    else:
+        noise_defaults = {
+            "photons": 1,
+            "background": 0,
+            "read": 0,
+        }
+    photons = photons or noise_defaults["photons"]
+    background = background or noise_defaults["background"]
+    read_noise = noise_defaults["read"]
+
     counts = simulate_image_as_photon_counts(coefs, z, photons, background, solver)
     jac = calculate_image_jacobian(coefs, z, photons, background, solver)
-    inv_variance = 1.0 / (counts + solver.noise_cfg.read_noise ** 2)  # [Z, H, W]
+    inv_variance = 1.0 / (counts + read_noise ** 2)  # [Z, H, W]
     fisher_matrix = torch.einsum("zhw,zhwi,zhwj->zij", inv_variance, jac, jac)  # [Z, C_kept, C_kept]
     return counts, fisher_matrix
+
+
+def calculate_van_trees_bounds(
+        fisher_matrix: np.ndarray,
+        prior_covariance: Optional[np.ndarray] = None,
+) -> np.ndarray:
+    """
+    Van Trees bounds for the parameters in a Fisher matrix, optionally under a Gaussian prior.
+    If no prior is given, defaults to the uninformative prior.
+    Batch-averaging should be done to the Fisher matrices beforehand, not to the
+    Van Trees bounds afterwards.
+
+    Arguments:
+    - fisher_matrix: [..., C, C]
+    - prior_covariance: [C, C] covariance matrix
+    Returns:
+    - standard deviation bound per parameter, [..., C]
+    """
+
+    if prior_covariance is None:
+        prior_precision = np.zeros_like(fisher_matrix)
+    else:
+        prior_precision = np.linalg.inv(prior_covariance)
+    posterior_covariance = np.linalg.inv(fisher_matrix + prior_precision)
+    return np.sqrt(np.diagonal(posterior_covariance, axis1=-2, axis2=-1))
