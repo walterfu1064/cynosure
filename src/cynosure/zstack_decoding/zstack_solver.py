@@ -495,7 +495,7 @@ class ZstackSolver(pl.LightningModule):
         - phase_coefs: [B, num_phase_coefs] effective phase aberration coefficients (including jitter offsets)
         - amp_coefs: [B, num_amp_coefs] amp aberration coefficients
         """
-        phase_coefs, amp_coefs = self.generate_phase_amp_coefficients(batch_size, self.device, generator)
+        phase_coefs, amp_coefs = self.generate_phase_amp_coefficients(batch_size, generator=generator)
         offsets = self._sample_z_jitter(batch_size, generator=generator)
         images = self.simulate_normalized_stacks(
             phase_coefs, amp_coefs, with_noise=True, offsets=offsets, generator=generator

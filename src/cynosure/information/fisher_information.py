@@ -1,4 +1,3 @@
-import math
 from typing import Optional
 
 import numpy as np
@@ -119,10 +118,10 @@ def calculate_van_trees_bounds(
         prior_covariance: Optional[np.ndarray] = None,
 ) -> np.ndarray:
     """
-    Van Trees bounds for the parameters in a Fisher matrix, optionally under a Gaussian prior.
-    If no prior is given, defaults to the uninformative prior.
+    Returns the van Trees bounds for the parameters in a Fisher matrix, optionally
+    under a Gaussian prior. If no prior is given, defaults to the uninformative prior.
     Batch-averaging should be done to the Fisher matrices beforehand, not to the
-    Van Trees bounds afterwards.
+    van Trees bounds afterwards.
 
     Arguments:
     - fisher_matrix: [..., C, C]
