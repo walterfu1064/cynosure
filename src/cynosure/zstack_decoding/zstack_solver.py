@@ -324,7 +324,7 @@ class ZstackSolver(pl.LightningModule):
     def generate_phase_amp_coefficients(
             self,
             batch_size: int,
-            device: torch.device,
+            device: Optional[torch.device] = None,
             generator: Optional[torch.Generator] = None,
     ) -> tuple[torch.Tensor, torch.Tensor]:
         """
@@ -333,6 +333,8 @@ class ZstackSolver(pl.LightningModule):
 
         Outputs are [B, num_phase] and [B, num_amp].
         """
+
+        device = device or self.device
 
         phase_coefs = self._sample_pinned_coefficients(
             self.propagator.phase_projector,
