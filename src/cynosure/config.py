@@ -27,6 +27,8 @@ class TrainingConfig:
     val_batches: int = 32
     val_seed: int = 42  # keeps validation passes consistently seeded
     mixing_warmup_epochs: int = 0  # only used in `ZstackSolver_MixedDensity` to prevent premature component collapse
+    min_allocation: float = 0.05  # floor on each component to avoid killing entirely
+    mixing_entropy_weight: float = 0.0  # mixing-weight entropy loss (opposes component collapse)
 
 
 @dataclass(frozen=True, slots=True)

@@ -676,7 +676,7 @@ class ZstackSolver_Covariance(ZstackSolver):
         Converts the flattened [B, K] Cholensky factors to lower-triangular [B, N_kept, N_kept].
         Also applies softplus to the diagonal, to keep the Cholensky decomposition unique.
         """
-        chol_entries = torch.where(self.tril_is_diagonal, F.softplus(chol_entries) + 1e-6, chol_entries)
+        chol_entries = torch.where(self.tril_is_diagonal, F.softplus(chol_entries) + 1e-3, chol_entries)
         scale_tril = chol_entries.new_zeros(chol_entries.shape[0], self.num_nonpiston_coefs, self.num_nonpiston_coefs)
         scale_tril[:, self.tril_indices[0], self.tril_indices[1]] = chol_entries
         return scale_tril
@@ -842,7 +842,7 @@ class ZstackSolver_MixedDensity(ZstackSolver):
         Converts the flattened [..., T] Cholesky factors to lower-triangular [..., N_kept, N_kept].
         Also applies softplus to the diagonal, to keep the Cholesky decomposition unique.
         """
-        chol_entries = torch.where(self.tril_is_diagonal, F.softplus(chol_entries) + 1e-6, chol_entries)
+        chol_entries = torch.where(self.tril_is_diagonal, F.softplus(chol_entries) + 1e-3, chol_entries)
         scale_tril = chol_entries.new_zeros(*chol_entries.shape[:-1], self.num_nonpiston_coefs, self.num_nonpiston_coefs)
         scale_tril[..., self.tril_indices[0], self.tril_indices[1]] = chol_entries
         return scale_tril
@@ -879,9 +879,11 @@ class ZstackSolver_MixedDensity(ZstackSolver):
         mixing_logits = self._mixing_logits(mixture)
         targets_kept = targets[:, ~self.is_piston]
 
-        with torch.no_grad():  # allocations to components under current mixture, Prob(component | target)
-            log_joint = mixing_logits + dist.log_prob(targets_kept.unsqueeze(1))
-            allocations = log_joint.softmax(dim=1)
+        with torch.no_grad():
+            allocations = dist.log_prob(targets_kept.unsqueeze(1)).softmax(dim=1)
+            floor = self.train_cfg.min_allocation
+            if floor > 0:
+                allocations = (1 - floor * self.num_components) * allocations + floor
 
         dist_mse = (dist.mean - targets_kept.unsqueeze(1)).square().mean(dim=2)
         mu_loss = (allocations * dist_mse).sum(dim=1).mean()  # allocation-weighted MSE
@@ -894,9 +896,12 @@ class ZstackSolver_MixedDensity(ZstackSolver):
         )  # detach the mean so the covariance head can't push it back to the uninformative priors
         sigma_nll = -detached_mixture.log_prob(targets_kept).mean() / self.num_nonpiston_coefs  # per-coefficient scale
 
-        weight_entropy = mixture.mixture_distribution.entropy().mean()  # 0 if sticks to one component, log(K) else
+        weight_entropy = torch.distributions.Categorical(
+            logits=mixing_logits
+        ).entropy().mean()  # 0 if single component, log(K) else
         logs = {"mu_mse": mu_loss, "sigma_nll": sigma_nll, "weight_entropy": weight_entropy}
-        return mu_loss + sigma_nll, logs
+        loss = mu_loss + sigma_nll - self.train_cfg.mixing_entropy_weight * weight_entropy
+        return loss, logs
 
     def val_metrics(self, predictions: torch.Tensor, targets: torch.Tensor) -> dict:
         metrics = super().val_metrics(predictions, targets)
