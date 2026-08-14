@@ -884,7 +884,7 @@ class ZstackSolver_MixedDensity(ZstackSolver):
         with torch.no_grad():
             allocations = dist.log_prob(targets_kept.unsqueeze(1)).softmax(dim=1)
             floor = self.train_cfg.min_allocation
-            if floor > 0:
+            if floor > 0 and self.current_epoch >= self.train_cfg.mixing_warmup_epochs:
                 allocations = (1 - floor * self.num_components) * allocations + floor
 
         dist_mse = (dist.mean - targets_kept.unsqueeze(1)).square().mean(dim=2)
