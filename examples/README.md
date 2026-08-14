@@ -19,7 +19,11 @@
    5. [`zstack_decoding/example_2e.ipynb`](zstack_decoding/example_2e.ipynb) - Estimation of the same
           single-image posterior by flow matching, sampled by integrating the learned velocity field.
 3. [`information_theory`](information_theory/) - Sandbox for exploring
-          the information content in aberrated images as probed using the aforementioned models. 
+          the information content in aberrated images as probed using the aforementioned models.
+          Will probably continue to evolve as other ideas to try come to me.
+   1. [`information_theory/example_3.ipynb`](information_theory/example_3.ipynb) - Analyzing how the
+          predicted uncertainty in each coefficient from a mixed-density model varies as a function
+          of how defocused an input image is, and comparing against the van Trees bound.
 
 ## Data
 
