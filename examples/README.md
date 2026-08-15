@@ -24,6 +24,8 @@
    1. [`information_theory/example_3a.ipynb`](information_theory/example_3a.ipynb) - Analyzing how the
           predicted uncertainty in each coefficient from a mixed-density model varies as a function
           of how defocused an input image is, and comparing against the van Trees bound.
+   2. [`information_theory/example_3b.ipynb`](information_theory/example_3b.ipynb) - Analyzing the
+          forwards model by itself in terms of its information content, separated by aberration and defocus.
 
 ## Data
 
