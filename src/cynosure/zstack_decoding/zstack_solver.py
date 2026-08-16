@@ -37,21 +37,23 @@ from ..config import (
     VelocityConfig,
     ZernikeConfig,
 )
-from ..utilities.fft_utilities import convolve_psf_with_object
+from ..object_distribution import ObjectDistribution
+# from ..utilities.fft_utilities import convolve_psf_with_object
 from ..utilities.ode_solvers import EulerSolver, ODESolver
 from ..zernike import ZernikeProjector
 
 
-def make_object_distribution(
-        object_grid_size: int,
-        object_pixel_size: float,
-        bead_diameter: float,
-) -> torch.Tensor:
-    coords = torch.arange(-(object_grid_size//2), object_grid_size//2 + 1) * object_pixel_size
-    Y, X = torch.meshgrid(coords, coords, indexing="ij")
-    R = torch.sqrt(X*X + Y*Y)
-    object_distrib = (R <= bead_diameter/2).float()
-    return object_distrib
+# def make_object_distribution(
+#         object_grid_size: int,
+#         object_pixel_size: float,
+#         bead_diameter: float,
+# ) -> torch.Tensor:
+#     # TODO - deprecate in favor of `object_distribution` classes
+#     coords = torch.arange(-(object_grid_size//2), object_grid_size//2 + 1) * object_pixel_size
+#     Y, X = torch.meshgrid(coords, coords, indexing="ij")
+#     R = torch.sqrt(X*X + Y*Y)
+#     object_distrib = (R <= bead_diameter/2).float()
+#     return object_distrib
 
 
 class ZstackSolver(pl.LightningModule):
@@ -70,7 +72,7 @@ class ZstackSolver(pl.LightningModule):
             amp_cfg: ZernikeConfig,
             phase_prior_cfg: PriorConfig,
             amp_prior_cfg: PriorConfig,
-            object_distribution: torch.Tensor,
+            object_distribution: ObjectDistribution,
             z_objective: Optional[torch.Tensor] = None,
             z_jitter: float = 0.0,
             noise_cfg: Optional[NoiseConfig] = None,
@@ -102,8 +104,7 @@ class ZstackSolver(pl.LightningModule):
         self._setup_jitter_decomposition()  # must come before whitening, which widens the jittered target scales
         self._setup_whitening()  # must be initialized before decoder
         self.decoder = self._setup_decoder(hidden_channels, embedding_dims)
-
-        self.register_buffer("object_distribution", object_distribution.to(self.ftype))
+        self.object_distribution = object_distribution
 
     def _setup_decoder(
             self,
@@ -397,7 +398,8 @@ class ZstackSolver(pl.LightningModule):
             phase_chunk = phase_coefs[start:stop].repeat_interleave(self.num_z, dim=0)
             amp_chunk = amp_coefs[start:stop].repeat_interleave(self.num_z, dim=0)
             psf = self.propagator(z_chunk, phase_chunk, amp_chunk)
-            img = convolve_psf_with_object(self.object_distribution, psf)
+            obj_dist = self.object_distribution(chunk_size)
+            img = self.object_distribution.convolve_psf(psf, obj_dist)
             image_chunks.append(img.reshape(stop - start, self.num_z, *img.shape[-2:]))
         return torch.cat(image_chunks)
 
@@ -745,7 +747,7 @@ class ZstackSolver_MixedDensity(ZstackSolver):
             amp_cfg: ZernikeConfig,
             phase_prior_cfg: PriorConfig,
             amp_prior_cfg: PriorConfig,
-            object_distribution: torch.Tensor,
+            object_distribution: ObjectDistribution,
             z_objective: Optional[torch.Tensor] = None,
             z_jitter: float = 0.0,
             noise_cfg: Optional[NoiseConfig] = None,
@@ -974,7 +976,7 @@ class ZstackSolver_FlowMatching(ZstackSolver):
             phase_prior_cfg: PriorConfig,
             amp_prior_cfg: PriorConfig,
             vel_cfg: VelocityConfig,
-            object_distribution: torch.Tensor,
+            object_distribution: ObjectDistribution,
             z_objective: Optional[torch.Tensor] = None,
             z_jitter: float = 0.0,
             noise_cfg: Optional[NoiseConfig] = None,
