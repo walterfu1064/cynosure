@@ -252,13 +252,15 @@ class FreeField(ObjectDistribution):
             self,
             sim_cfg: SimulationConfig,
             initial_speckle: float = 1.0e-3,
-            generator: Optional[torch.Generator] = None,
+            rng: Optional[int | torch.Generator] = None,
     ):
         super().__init__(sim_cfg)
         if initial_speckle < 0:
             raise ValueError(f"Initial speckle must be non-negative, got {initial_speckle}")
         self.initial_speckle = initial_speckle
-        self.logits = nn.Parameter(self._initial_logits(generator))
+        if isinstance(rng, int):
+            rng = torch.Generator().manual_seed(rng)
+        self.logits = nn.Parameter(self._initial_logits(rng))
 
     def _initial_logits(self, generator: Optional[torch.Generator] = None) -> torch.Tensor:
         """Logits for a uniform object plus a bit of speckle to break symmetry"""

@@ -2,7 +2,7 @@ from .object_distribution import (
     ObjectDistribution,
     FixedBead,
     ParametricBead,
+    FreeField,
     # FixedObject,
-    # FreeField,
     # PriorSampledObject,
 )
