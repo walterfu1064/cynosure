@@ -4,7 +4,6 @@ import numpy as np
 import torch
 
 from cynosure.zstack_decoding import ZstackSolver
-from cynosure.utilities.fft_utilities import convolve_psf_with_object
 from cynosure.zstack_decoding.noise_model import scale_to_photon_counts
 
 
@@ -77,8 +76,8 @@ def simulate_image_as_photon_counts(
     phase_coefs, amp_coefs = solver.split_phase_amp(full_coefs)
     phase_coefs = phase_coefs.unsqueeze(0).expand(num_z, -1)
     amp_coefs = amp_coefs.unsqueeze(0).expand(num_z, -1)
-    psf = solver.propagator(defocus, phase_coefs, amp_coefs)
-    images = convolve_psf_with_object(solver.object_distribution, psf)
+    psf = solver.propagator(defocus, phase_coefs, amp_coefs)  # [Z, H, W]
+    images = solver.object_distribution(psf.unsqueeze(0), batch_size=1).squeeze(0)
     return scale_to_photon_counts(images, photons, background)
 
 

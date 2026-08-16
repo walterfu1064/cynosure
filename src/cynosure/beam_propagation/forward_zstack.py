@@ -15,7 +15,7 @@ from torch.nn import Parameter
 
 from . import BeamPropagator
 from ..config import SimulationConfig, OpticalConfig, ZernikeConfig
-from ..utilities.fft_utilities import convolve_psf_with_object
+from ..object_distribution import ObjectDistribution
 
 
 class ForwardZstack(nn.Module):
@@ -25,7 +25,7 @@ class ForwardZstack(nn.Module):
             optics_cfg: OpticalConfig,
             phase_cfg: ZernikeConfig,
             z_objective: torch.Tensor,
-            object_distribution: torch.Tensor,
+            object_distribution: ObjectDistribution,
             *,
             amp_cfg: Optional[ZernikeConfig] = None,
             max_z_adjust: float = 0.5,
@@ -40,7 +40,7 @@ class ForwardZstack(nn.Module):
         - optics_cfg: optical system configuration
         - phase_cfg: phase aberration configuration
         - z_objective: physical objective/stage positions, as reported by the microscope
-        - object_distribution: tensor representing the emitter in the object space
+        - object_distribution: model of the emitter in the object space
         Kwargs:
         - amp_cfg: (optional) amplitude aberration configuration
         - max_z_adjust: max distance the fitted global defocus may go in either direction
@@ -137,6 +137,6 @@ class ForwardZstack(nn.Module):
         - [B, H, W] tensor of calculated object intensities
         """
         z = self.get_recalibrated_z()
-        psf = self.propagator(z, self.phase_coefs, self.amp_coefs)
-        image = convolve_psf_with_object(self.object_distribution, psf)
+        psf = self.propagator(z, self.phase_coefs, self.amp_coefs)  # [num_z, H, W]
+        image = self.object_distribution(psf.unsqueeze(0), batch_size=1).squeeze(0)  # a batch of one z-stack
         return self._apply_learned_image_normalization(image)
