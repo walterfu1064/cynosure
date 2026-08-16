@@ -148,7 +148,7 @@ class BeamPropagator(nn.Module):
         )
         r = torch.sqrt(x**2 + y**2)
         phi = torch.atan2(y, x)
-        return GridCollection(x, y, r, phi)
+        return GridCollection(x.contiguous(), y.contiguous(), r, phi)  # because `meshgrid` returns 0-stride views
 
     def _setup_pupil_coordinates(self) -> None:
         """
