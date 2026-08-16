@@ -11,6 +11,7 @@ from cynosure.config import (
     TrainingConfig,
     ZernikeConfig,
 )
+from cynosure.config_defaults import get_default_training_config
 from cynosure.object_distribution import FixedBead
 from cynosure.zstack_decoding.zstack_solver import (
     ZstackSolver,
@@ -20,7 +21,7 @@ from cynosure.zstack_decoding.zstack_solver import (
 
 def make_train_cfg(**overrides) -> TrainingConfig:
     """Training config for tests: small generator chunks, everything else default"""
-    return TrainingConfig(generator_chunk=8, **overrides)
+    return get_default_training_config(generator_chunk=8, **overrides)
 
 
 def make_solver(
@@ -33,7 +34,13 @@ def make_solver(
         **kwargs,
 ):
     """Builds a minimal solver for testing synthetic data generation"""
-    sim_cfg = SimulationConfig(pupil_grid_size=63, object_grid_size=31, object_pixel_size=0.1)
+    sim_cfg = SimulationConfig(
+        pupil_grid_size=63,
+        object_grid_size=31,
+        object_pixel_size=0.1,
+        ftype=torch.float32,
+        ctype=torch.complex64,
+)
     opt_cfg = OpticalConfig(
         wavelength=0.51,
         focal_length=4.5e3,

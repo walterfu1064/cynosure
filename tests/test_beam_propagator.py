@@ -46,6 +46,8 @@ def make_propagator(
         pupil_grid_size=pupil_grid_size,
         object_grid_size=object_grid_size,
         object_pixel_size=object_pixel_size,
+        ftype=torch.float64,
+        ctype=torch.complex128,
     )
     opt = OpticalConfig(
         wavelength=wavelength,
