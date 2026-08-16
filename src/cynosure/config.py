@@ -8,7 +8,7 @@ within that constraint.
 
 import math
 from dataclasses import dataclass, field
-from typing import Literal, Sequence
+from typing import Literal, Optional, Sequence
 
 import torch
 
@@ -19,16 +19,16 @@ class TrainingConfig:
     Defines meta-aspects of how a model should train/validate.
     Encapsulated here to clean up the ZstackSolver constructors.
     """
-    learning_rate: float = 1.0e-3
-    weight_decay: float = 1.0e-3
-    batch_size: int = 32
-    generator_chunk: int = 4  # chunk size for z-stack simulation to bound peak memory use
-    steps_per_epoch: int = 200
-    val_batches: int = 32
-    val_seed: int = 42  # keeps validation passes consistently seeded
-    mixing_warmup_epochs: int = 0  # only used in `ZstackSolver_MixedDensity` to prevent premature component collapse
-    min_allocation: float = 0.05  # floor on each component to avoid killing entirely
-    mixing_entropy_weight: float = 0.0  # mixing-weight entropy loss (opposes component collapse)
+    learning_rate: float
+    weight_decay: float
+    batch_size: int
+    generator_chunk: int  # chunk size for z-stack simulation to bound peak memory use
+    steps_per_epoch: int
+    val_batches: int
+    val_seed: int  # keeps validation passes consistently seeded
+    mixing_warmup_epochs: int  # only used in `ZstackSolver_MixedDensity` to prevent premature component collapse
+    min_allocation: float  # floor on each component to avoid killing entirely
+    mixing_entropy_weight: float  # mixing-weight entropy loss (opposes component collapse)
 
 
 @dataclass(frozen=True, slots=True)
@@ -37,8 +37,8 @@ class SimulationConfig:
     pupil_grid_size: int  # recommended to be `2^n - 1` for some `n`
     object_grid_size: int  # recommended to be `2^n - 1` for some `n`
     object_pixel_size: float
-    ftype: torch.dtype = torch.float64
-    ctype: torch.dtype = torch.complex128
+    ftype: torch.dtype
+    ctype: torch.dtype
 
 
 @dataclass(frozen=True, slots=True)
@@ -49,7 +49,7 @@ class OpticalConfig:
     numerical_aperture: float  # `medium_index * sin(theta_max)`
     aperture_type: Literal["flat", "gaussian", "supergaussian", "fitted"]
     medium_index: float  # emitter's embedding medium
-    immersion_index: float | None = None  # objective's immersion (defaults to no interface/no z-rescaling)
+    immersion_index: Optional[float]  # objective's immersion (defaults to no interface/no z-rescaling)
 
 
 @dataclass(frozen=True, slots=True)
@@ -121,8 +121,8 @@ class VelocityConfig:
     Defines how a VelocityFlow model should be constructed,
     and how it should be integrated during inference.
     """
-    time_embedding_dims: int = 32
-    hidden_dims: Sequence[int] = (256, 256, 256)
-    is_residual: bool = True
-    residual_dims: int = 512
-    num_sample_steps: int = 50
+    time_embedding_dims: int
+    hidden_dims: Sequence[int]
+    is_residual: bool
+    residual_dims: int
+    num_sample_steps: int
