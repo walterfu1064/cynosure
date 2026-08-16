@@ -26,9 +26,6 @@ class TrainingConfig:
     steps_per_epoch: int
     val_batches: int
     val_seed: int  # keeps validation passes consistently seeded
-    mixing_warmup_epochs: int  # only used in `ZstackSolver_MixedDensity` to prevent premature component collapse
-    min_allocation: float  # floor on each component to avoid killing entirely
-    mixing_entropy_weight: float  # mixing-weight entropy loss (opposes component collapse)
 
 
 @dataclass(frozen=True, slots=True)
@@ -116,13 +113,36 @@ class NoiseConfig:
 
 
 @dataclass(frozen=True, slots=True)
+class MixtureConfig:
+    """
+    Defines how a Mixture-Density Network should be constructed and trained.
+    """
+    num_components: int
+    mixing_warmup_epochs: int  # weights held uniform this long, to prevent premature component collapse
+    min_allocation: float  # floor on each component's responsibility, to avoid killing one entirely
+    mixing_entropy_weight: float  # mixing-weight entropy bonus (opposes component collapse)
+
+
+@dataclass(frozen=True, slots=True)
 class VelocityConfig:
     """
-    Defines how a VelocityFlow model should be constructed,
-    and how it should be integrated during inference.
+    Defines how a VelocityFlow model should be constructed, and how it should be integrated during inference.
     """
     time_embedding_dims: int
     hidden_dims: Sequence[int]
     is_residual: bool
     residual_dims: int
     num_sample_steps: int
+
+
+# These dataclasses are frozen and hold numbers, mark them save to serialize so `torch.load` doesn't complain
+torch.serialization.add_safe_globals([
+    MixtureConfig,
+    NoiseConfig,
+    OpticalConfig,
+    PriorConfig,
+    SimulationConfig,
+    TrainingConfig,
+    VelocityConfig,
+    ZernikeConfig,
+])
