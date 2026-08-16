@@ -241,8 +241,46 @@ class FixedObject(ObjectDistribution):
 
 
 class FreeField(ObjectDistribution):
-    """TODO - will implement an unconstrained, fittable object distribution"""
-    ...
+    """
+    An unconstrained, fittable object distribution.
+
+    Represents the object as a tensor of logits on the object grid.
+    Sigmoiding and then normalizing to unity sum (to match the pinned amplitude piston)
+    yields the object distribution itself, for convolving with the PSF.
+    """
+    def __init__(
+            self,
+            sim_cfg: SimulationConfig,
+            initial_speckle: float = 1.0e-3,
+            generator: Optional[torch.Generator] = None,
+    ):
+        super().__init__(sim_cfg)
+        if initial_speckle < 0:
+            raise ValueError(f"Initial speckle must be non-negative, got {initial_speckle}")
+        self.initial_speckle = initial_speckle
+        self.logits = nn.Parameter(self._initial_logits(generator))
+
+    def _initial_logits(self, generator: Optional[torch.Generator] = None) -> torch.Tensor:
+        """Logits for a uniform object plus a bit of speckle to break symmetry"""
+        noise = torch.randn(self.shape, generator=generator, dtype=self.sim_cfg.ftype)
+        return noise * self.initial_speckle
+
+    @property
+    def field(self) -> torch.Tensor:
+        """The current [H, W] object distribution, non-negative with unity sum"""
+        field = torch.sigmoid(self.logits)
+        return field / field.sum()
+
+    def sample(
+            self,
+            batch_size: int = 1,
+            generator: Optional[torch.Generator] = None,
+    ) -> torch.Tensor:
+        """
+        Returns the current field, repeated to [B, 1, H, W].
+        Deterministic given the fitted logits, so `generator` is unused.
+        """
+        return self._repeat_static(self.field, batch_size)
 
 
 class PriorSampledObject(ObjectDistribution):
