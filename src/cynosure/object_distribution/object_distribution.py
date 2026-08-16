@@ -1,9 +1,12 @@
 """
 Models of an object to be imaged.
 
-Each subclass implements a `forwards()` call that returns a [B, H, W]
-batch of object distributions to be convolved with the PSF. Static and
-learnable shapes will be included.
+Each subclass implements `sample()`, which returns a [B, 1, H, W]
+batch of object distributions to be convolved with the (possibly multi-z) PSF.
+
+This sampling and convolution can be done in a single call using `forwards()`.
+
+Subclasses will implement different static or learnable object shapes.
 """
 
 from abc import ABC, abstractmethod
@@ -23,7 +26,7 @@ def make_radial_field(
         dtype: torch.dtype = torch.float32,
 ) -> torch.Tensor:
     """Returns a [grid_size, grid_size] tensor giving distance from the grid center in physical units"""
-    coords = torch.arange(-(grid_size // 2), grid_size // 2 + 1, dtype=dtype) * pixel_size
+    coords = (torch.arange(grid_size, dtype=dtype) - grid_size // 2) * pixel_size
     Y, X = torch.meshgrid(coords, coords, indexing="ij")
     R = torch.sqrt(X * X + Y * Y)
     return R.to(dtype)
@@ -33,8 +36,9 @@ class ObjectDistribution(nn.Module, ABC):
     """
     Base class for object distributions.
     Handles bookkeeping for the object grid and the PSF-convolving FFT grid.
-    Subclasses implement `forward` which returns a batch of object distributions (either identical
+    Subclasses implement `sample`, which returns a batch of object distributions (either identical
     across the batch for static distributions, or independently resampled for stochastic ones).
+    `forward` composes that draw with the PSF convolution.
     """
 
     def __init__(self, sim_cfg: SimulationConfig):
@@ -61,46 +65,65 @@ class ObjectDistribution(nn.Module, ABC):
         return self.fft_size, self.fft_size
 
     @abstractmethod
-    def forward(
+    def sample(
             self,
             batch_size: int = 1,
             generator: Optional[torch.Generator] = None,
     ) -> torch.Tensor:
         """
-        Returns a [B, H, W] batch of object distributions.
+        Returns a [B, 1, H, W] batch of object distributions, broadcastable against a batch of z-stacks.
+        Singlet dimensions should be used to keep this shape.
         Identical across batch for static distributions, independently sampled for stochastic ones.
         """
         ...
 
+    def forward(
+            self,
+            psf: torch.Tensor,
+            batch_size: int = 1,
+            generator: Optional[torch.Generator] = None,
+    ) -> torch.Tensor:
+        """
+        Draws a batch of object distributions and convolves it with `psf`.
+
+        Arguments:
+        - psf: [B, Z, H, W] from a BeamPropagator
+        - batch_size: number of z-stacks to draw objects for, must match the leading dimension of `psf`
+        Returns:
+        - [B, Z, H, W] images
+        """
+        return self.convolve_psf(psf, self.sample(batch_size, generator))
+
     @staticmethod
     def _repeat_static(distribution: torch.Tensor, batch_size: int) -> torch.Tensor:
-        """Broadcasts a static [H, W] distribution to [B, H, W] and returns as a view"""
-        return distribution.unsqueeze(0).expand(batch_size, -1, -1)
+        """Broadcasts a static [H, W] distribution to [B, 1, H, W] and returns as a view"""
+        return distribution.expand(batch_size, 1, -1, -1)
 
     def convolve_psf(self, psf: torch.Tensor, distribution: torch.Tensor) -> torch.Tensor:
         """
         Convolves a batch of object distributions with a batch of PSFs.
 
         Arguments:
-        - psf: [..., H, W] floating point tensor with its origin at (H//2, W//2) (i.e., the
-          natural order for viewing, but not the natural FFT order)
-        - distribution: [..., H, W] as returned by `forward`, broadcastable against `psf`
+        - psf: [B, Z, H, W] with its origin at (H//2, W//2) (the natural viewing order, but not the natural FFT order)
+        - distribution: [B, 1, H, W] as returned by `sample`, broadcastable against `psf`
         Returns:
-        - [..., H, W] convolved objects
+        - [B, Z, H, W] convolved objects
         """
+
+        if psf.ndim != 4:
+            raise ValueError(f"PSF must be [B, Z, H, W], got {psf.shape}")
+        if distribution.ndim != 4:
+            raise ValueError(f"Object distribution must be [B, Z, H, W], got {distribution.shape}")
+
         if psf.shape[-2:] != self.shape:
-            raise ValueError(f"PSF grid {tuple(psf.shape[-2:])} does not match the object grid {self.shape}")
-        if distribution.shape[-2:] != self.shape:
-            raise ValueError(
-                f"Object distribution grid {tuple(distribution.shape[-2:])} does not match object grid {self.shape}"
-            )
+            raise ValueError(f"PSF spatial dims {psf.shape[-2:]} does not match object shape {self.shape}")
+        if distribution.shape[-2:] != self.shape:  # should never happen if `convolve_psf` is only called internally
+            raise ValueError(f"Object spatial dims {psf.shape[-2:]} does not match object shape {self.shape}")
+
         try:
-            torch.broadcast_shapes(distribution.shape[:-2], psf.shape[:-2])
+            torch.broadcast_shapes(distribution.shape[:2], psf.shape[:2])
         except RuntimeError as error:
-            raise ValueError(
-                f"Object distribution batch {tuple(distribution.shape[:-2])} cannot "
-                f"broadcast against the PSF's {tuple(psf.shape[:-2])}"
-            ) from error
+            raise ValueError(f"Cannot broadcast {distribution.shape} object against {psf.shape} PSF") from error
 
         psf_padded = psf.new_zeros(*psf.shape[:-2], *self.fft_shape)
         psf_padded[..., :self.size, :self.size] = psf
@@ -131,13 +154,13 @@ class FixedBead(ObjectDistribution):
         bead = bead.to(self.sim_cfg.ftype)
         return bead
 
-    def forward(
+    def sample(
             self,
             batch_size: int = 1,
             generator: Optional[torch.Generator] = None,
     ) -> torch.Tensor:
         """
-        Returns the stored distribution, repeated to [B, H, W].
+        Returns the stored distribution, repeated to [B, 1, H, W].
         Deterministic, so `generator` is unused.
         """
         return self._repeat_static(self._object_distribution, batch_size)
@@ -174,13 +197,13 @@ class ParametricBead(ObjectDistribution):
         bead = bead.to(self.sim_cfg.ftype)
         return bead
 
-    def forward(
+    def sample(
             self,
             batch_size: int = 1,
             generator: Optional[torch.Generator] = None,
     ) -> torch.Tensor:
         """
-        Returns the rasterized bead, repeated to [B, H, W].
+        Returns the rasterized bead, repeated to [B, 1, H, W].
         Deterministic, so `generator` is unused.
         """
         bead = self._make_bead()
@@ -205,13 +228,13 @@ class FixedObject(ObjectDistribution):
 
         self.register_buffer("_object_distribution", object_distribution.to(sim_cfg.ftype))
 
-    def forward(
+    def sample(
             self,
             batch_size: int = 1,
             generator: Optional[torch.Generator] = None,
     ) -> torch.Tensor:
         """
-        Returns the stored distribution, repeated to [B, H, W].
+        Returns the stored distribution, repeated to [B, 1, H, W].
         Deterministic, so `generator` is unused.
         """
         return self._repeat_static(self._object_distribution, batch_size)

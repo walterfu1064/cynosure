@@ -11,10 +11,10 @@ from cynosure.config import (
     TrainingConfig,
     ZernikeConfig,
 )
+from cynosure.object_distribution import FixedBead
 from cynosure.zstack_decoding.zstack_solver import (
     ZstackSolver,
     ZstackSolver_MixedDensity,
-    make_object_distribution,
 )
 
 
@@ -45,7 +45,7 @@ def make_solver(
     max_n = max(n for n, _ in phase_allowed)
     phase_cfg = ZernikeConfig(max_n, allowed_nm=phase_allowed)
     amp_cfg = ZernikeConfig(0)  # amplitude piston only
-    object_distrib = make_object_distribution(sim_cfg.object_grid_size, sim_cfg.object_pixel_size, 0.1)
+    object_distrib = FixedBead(sim_cfg, 0.1)
 
     return solver_cls(
         train_cfg=train_cfg if train_cfg is not None else make_train_cfg(),

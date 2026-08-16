@@ -38,12 +38,12 @@ from ..config import (
     ZernikeConfig,
 )
 from ..object_distribution import ObjectDistribution
-# from ..utilities.fft_utilities import convolve_psf_with_object
+# from ..utilities.fft_utilities import convolve_psf_with_object  # TODO - remove
 from ..utilities.ode_solvers import EulerSolver, ODESolver
 from ..zernike import ZernikeProjector
 
 
-# def make_object_distribution(
+# def make_object_distribution(  # TODO - remove
 #         object_grid_size: int,
 #         object_pixel_size: float,
 #         bead_diameter: float,
@@ -398,9 +398,9 @@ class ZstackSolver(pl.LightningModule):
             phase_chunk = phase_coefs[start:stop].repeat_interleave(self.num_z, dim=0)
             amp_chunk = amp_coefs[start:stop].repeat_interleave(self.num_z, dim=0)
             psf = self.propagator(z_chunk, phase_chunk, amp_chunk)
-            obj_dist = self.object_distribution(chunk_size)
-            img = self.object_distribution.convolve_psf(psf, obj_dist)
-            image_chunks.append(img.reshape(stop - start, self.num_z, *img.shape[-2:]))
+            psf = psf.reshape(stop - start, self.num_z, *psf.shape[-2:])  # unfold to [B, Z, H, W]
+            img = self.object_distribution(psf, batch_size=stop - start)
+            image_chunks.append(img)
         return torch.cat(image_chunks)
 
     def _sample_z_jitter(
