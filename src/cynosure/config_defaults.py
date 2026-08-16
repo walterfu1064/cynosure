@@ -12,6 +12,7 @@ from typing import Literal, Optional, Sequence
 import torch
 
 from cynosure.config import (
+    MixtureConfig,
     NoiseConfig,
     OpticalConfig,
     PriorConfig,
@@ -30,9 +31,6 @@ def get_default_training_config(
         steps_per_epoch: int = 200,
         val_batches: int = 32,
         val_seed: int = 42,
-        mixing_warmup_epochs: int = 10,
-        min_allocation: float = 0.05,
-        mixing_entropy_weight: float = 0.5,
 ) -> TrainingConfig:
     return TrainingConfig(
         learning_rate=learning_rate,
@@ -42,6 +40,17 @@ def get_default_training_config(
         steps_per_epoch=steps_per_epoch,
         val_batches=val_batches,
         val_seed=val_seed,
+    )
+
+
+def get_default_mixture_config(
+        num_components: int = 2,
+        mixing_warmup_epochs: int = 10,
+        min_allocation: float = 0.05,
+        mixing_entropy_weight: float = 0.5,
+) -> MixtureConfig:
+    return MixtureConfig(
+        num_components=num_components,
         mixing_warmup_epochs=mixing_warmup_epochs,
         min_allocation=min_allocation,
         mixing_entropy_weight=mixing_entropy_weight,
