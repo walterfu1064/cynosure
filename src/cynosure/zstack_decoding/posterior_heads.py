@@ -13,7 +13,7 @@ import math
 from abc import ABC, abstractmethod
 from collections.abc import Sequence
 from dataclasses import dataclass
-from typing import Optional
+from typing import Callable, Optional
 
 import torch
 import torch.nn as nn
@@ -21,6 +21,7 @@ import torch.nn.functional as F
 
 from .coefficients import CoefficientSpace
 from .submodules import CnnDecoder, CnnDecoder_DetachedHead
+from ..config import MixtureConfig
 
 
 @dataclass(frozen=True)
@@ -72,6 +73,13 @@ class CholeskyParameterization(nn.Module):
         scale_tril = chol_entries.new_zeros(*chol_entries.shape[:-1], self.dim, self.dim)
         scale_tril[..., self.tril_indices[0], self.tril_indices[1]] = chol_entries
         return scale_tril
+
+
+"""
+Used by a ZstackSolver to build a PosteriorHead.
+The class itself, or, if a config is needed, the class bound to that config via `functools.partial`.
+"""
+HeadFactory = Callable[[CoefficientSpace, EncoderSpec], "PosteriorHead"]
 
 
 class PosteriorHead(nn.Module, ABC):
@@ -323,15 +331,12 @@ class MixtureHead(PosteriorHead):
             coefficients: CoefficientSpace,
             encoder: EncoderSpec,
             *,
-            num_components: int = 4,
-            mixing_warmup_epochs: int = 0,
-            min_allocation: float = 0.0,
-            mixing_entropy_weight: float = 0.0,
+            cfg: MixtureConfig,
     ):
-        self.num_components = num_components
-        self.mixing_warmup_epochs = mixing_warmup_epochs
-        self.min_allocation = min_allocation
-        self.mixing_entropy_weight = mixing_entropy_weight
+        self.num_components = cfg.num_components
+        self.mixing_warmup_epochs = cfg.mixing_warmup_epochs
+        self.min_allocation = cfg.min_allocation
+        self.mixing_entropy_weight = cfg.mixing_entropy_weight
         super().__init__(coefficients, encoder)
 
     def build_network(self, encoder: EncoderSpec) -> nn.Module:
