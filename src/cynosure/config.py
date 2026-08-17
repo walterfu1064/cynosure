@@ -11,6 +11,7 @@ from dataclasses import dataclass, field
 from typing import Literal, Optional, Sequence
 
 import torch
+import yaml
 
 
 @dataclass(frozen=True, slots=True)
@@ -134,6 +135,9 @@ class VelocityConfig:
     residual_dims: int
     num_sample_steps: int
 
+
+# Allow dtypes to get saved by Lightning as hyperparams
+yaml.add_representer(torch.dtype, lambda dumper, dtype: dumper.represent_str(str(dtype)))
 
 # These dataclasses are frozen and hold numbers, mark them save to serialize so `torch.load` doesn't complain
 torch.serialization.add_safe_globals([
