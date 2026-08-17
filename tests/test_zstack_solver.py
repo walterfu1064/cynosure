@@ -11,10 +11,10 @@ from cynosure.config import (
     TrainingConfig,
     ZernikeConfig,
 )
-from cynosure.config_defaults import get_default_training_config
+from cynosure.config_defaults import get_default_mixture_config, get_default_training_config
 from cynosure.object_distribution import FixedBead
 from cynosure.zstack_decoding.zstack_solver import (
-    ZstackSolver,
+    ZstackSolver_MLE,
     ZstackSolver_MixedDensity,
 )
 
@@ -29,7 +29,7 @@ def make_solver(
         z_objective=None,
         z_jitter=0.0,
         phase_allowed=((2, 0),),
-        solver_cls=ZstackSolver,
+        solver_cls=ZstackSolver_MLE,
         train_cfg=None,
         **kwargs,
 ):
@@ -78,16 +78,16 @@ def test_z_jitter_to_phase_conversion():
     """Unaberrated image with z-offset ~= defocus-aberrated image at nominal focal plane"""
     solver = make_solver(z_objective=torch.zeros(1), z_jitter=1.0, phase_allowed=((2, 0), (4, 0), (6, 0)))
     offsets = torch.tensor([0.8], dtype=solver.ftype)
-    zero_phase = torch.zeros(1, solver.num_phase_coefs, dtype=solver.ftype)  # no phase aberrations
-    amp = solver.is_amp_piston.to(solver.ftype).unsqueeze(0)  # no amp aberrations
+    zero_phase = torch.zeros(1, solver.coefficients.block_size("phase"), dtype=solver.ftype)  # no phase aberrations
+    amp = solver.coefficients.is_amp_pinned.to(solver.ftype).unsqueeze(0)  # no amp aberrations
 
-    img_offset = solver.simulate_normalized_stacks(zero_phase, amp, offsets=offsets)  # z-jittered, unaberrated
-    defocus_phase = zero_phase + solver._z_jitter_to_phase_coefs(offsets)
+    img_offset = solver.simulator.simulate_normalized_stacks(zero_phase, amp, offsets=offsets)  # z-jittered, unaberrated
+    defocus_phase = zero_phase + solver.simulator.z_offset_to_coefficients(offsets)
 
-    img_label = solver.simulate_normalized_stacks(defocus_phase, amp, offsets=None)  # nominal z, defocus-aberrated
+    img_label = solver.simulator.simulate_normalized_stacks(defocus_phase, amp, offsets=None)  # nominal z, defocus-aberrated
     assert _rel_l1(img_label, img_offset) < 5e-3  # should agree
 
-    img_unfolded = solver.simulate_normalized_stacks(zero_phase, amp, offsets=None)  # nominal z, unaberrated
+    img_unfolded = solver.simulator.simulate_normalized_stacks(zero_phase, amp, offsets=None)  # nominal z, unaberrated
     assert _rel_l1(img_unfolded, img_offset) > 0.05  # should disagree
 
 
@@ -95,32 +95,33 @@ def test_reconstruction_through_z_offset():
     """Aberrated labels at a z-offset can be reconstructed, substituting z-offset for aberrations"""
     solver = make_solver(z_jitter=2.0, phase_allowed=((2, 0), (4, 0), (6, 0)))
     generator = torch.Generator().manual_seed(0)
-    images, phase_coefs, amp_coefs = solver.create_examples(8, generator=generator)
+    images, phase_coefs, amp_coefs = solver.simulator.create_examples(8, generator=generator)
 
-    recon = solver.simulate_normalized_stacks(phase_coefs, amp_coefs, offsets=None)
+    recon = solver.simulator.simulate_normalized_stacks(phase_coefs, amp_coefs, offsets=None)
     assert _rel_l1(recon, images) < 5e-3
 
 
 def _mixing_logit_grads(solver: ZstackSolver_MixedDensity) -> torch.Tensor:
     """Runs one loss backward and returns the gradient reaching the mixing logits"""
     generator = torch.Generator().manual_seed(0)
-    images, phase_coefs, amp_coefs = solver.create_examples(4, generator=generator)
-    targets = solver.whiten_targets(phase_coefs, amp_coefs)
+    images, phase_coefs, amp_coefs = solver.simulator.create_examples(4, generator=generator)
+    targets = solver.coefficients.whiten_blocks(phase_coefs, amp_coefs)
 
     predictions = solver.forward(images).detach().requires_grad_(True)
     loss, _ = solver.compute_losses(predictions, targets)
     loss.backward()
 
-    num_means = solver.num_components * solver.num_coefs
+    num_means = solver.num_components * solver.coefficients.num_coefs
     return predictions.grad[:, num_means:num_means + solver.num_components]
 
 
 def test_mixing_warmup_freezes_weights():
     """During the mixing warmup the logits get no gradient; without it (or after it) they do"""
-    kwargs = dict(z_jitter=1.0, phase_allowed=((2, 0), (2, 2)), solver_cls=ZstackSolver_MixedDensity, num_components=2)
+    kwargs = dict(z_jitter=1.0, phase_allowed=((2, 0), (2, 2)), solver_cls=ZstackSolver_MixedDensity)
 
-    warm = make_solver(train_cfg=make_train_cfg(mixing_warmup_epochs=1), **kwargs)  # current_epoch is 0 without a trainer
+    # current_epoch is 0 without a trainer, so a warmup of 1 epoch is still in effect
+    warm = make_solver(mixture_cfg=get_default_mixture_config(mixing_warmup_epochs=1), **kwargs)
     assert torch.all(_mixing_logit_grads(warm) == 0)
 
-    cold = make_solver(train_cfg=make_train_cfg(mixing_warmup_epochs=0), **kwargs)
+    cold = make_solver(mixture_cfg=get_default_mixture_config(mixing_warmup_epochs=0), **kwargs)
     assert torch.any(_mixing_logit_grads(cold) != 0)
