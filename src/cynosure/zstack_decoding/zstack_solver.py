@@ -61,6 +61,19 @@ class ZstackSolver(pl.LightningModule):
 
     Encapsulates an imaging system configuration, a z-stack decoder, and the training machinery
     that fits the latter on synthetic data generated from the former.
+
+    Different heads express different kinds of posteriors, and should be queried different ways:
+    -----------------------------------------------------------------------------------
+    |   head type     | predict_coefficients | predict_distribution | predict_samples |
+    |-----------------|----------------------|----------------------|-----------------|
+    |      MLE        |        yes           |       raises         |     raise       |
+    | Heteroscedastic |        yes           |    `Independent`     |      yes        |
+    |   Covariance    |        yes           | `MultivariateNormal` |      yes        |
+    |  MixedDensity   |        yes           | `MixtureSameFamily`  |      yes        |
+    |  FlowMatching   |        yes           |       raises         |  yes, via ODE   |
+    -----------------------------------------------------------------------------------
+
+    `ZstackSolver_MixedDensity` also adds `predict_component_coefficients`.
     """
 
     def __init__(
@@ -182,63 +195,43 @@ class ZstackSolver(pl.LightningModule):
         """
         return self.head(images)
 
-    def predicted_means(self, predictions: torch.Tensor) -> torch.Tensor:
-        """Whitened [B, N_tot] point estimate implied by a raw head output"""
-        return self.head.whitened_means(predictions)
-
     def predict_coefficients(self, images: torch.Tensor) -> tuple[torch.Tensor, ...]:
         """
-        Predicts physical aberration coefficients from a normalized z-stacks.
+        Predicts the most likely physical aberration coefficients from normalized z-stacks.
+        Supported by every subclass.
 
         Arguments:
         - images: [B, Z, H, W] batch of normalized z-stacks (singlet dimensions as needed)
         Returns:
-        - list of [B, N_coefs] tensors corresponding to each CoefficientBlock
+        - one [B, N_coefs] tensor per CoefficientBlock
         """
-        return self.coefficients.unwhiten_to_blocks(self.predicted_means(self.forward(images)))
+        return self.coefficients.unwhiten_to_blocks(self.head.whitened_means(self.forward(images)))
 
     def predict_distribution(self, images: torch.Tensor) -> torch.distributions.Distribution:
         """
-        Predicts the physical-space coefficient distribution, excluding the pinned coefs.
+        Predicts the physical-space coefficient distribution over the non-pinned coefs.
+        Only supported by certain subclasses.
 
         Arguments:
         - images: [B, Z, H, W] batch of normalized z-stacks
-        Returned distribution depends on the PosteriorHead type:
-        - `PointHead`: raises due to not predicting a density, use `predict_coefficients` instead
-        - `HeteroscedasticHead`: returns a `Independent`
-        - `CovarianceHead`: returns a `MultivariateNormal`
-        - `MixtureHead`: returns a `MixtureSameFamily`
-        - `FlowMatchingHead`: raises due to no closed-form density, use `predict_samples` instead
+        Returns:
+        - a Distribution, type depends on head type (see class docstring)
         """
-        return self._unwhiten_distribution(self.head.whitened_distribution(self.forward(images)))
+        return self.head.distribution(self.forward(images))
 
-    def _unwhiten_distribution(self, dist: torch.distributions.Distribution) -> torch.distributions.Distribution:
-        """Maps a whitened non-pinned posterior back into physical coefficient space"""
-        coefficients = self.coefficients
-        keep = ~coefficients.is_pinned
-        scales = coefficients.target_scales[keep]
-        means = coefficients.target_means[keep]
+    def predict_samples(self, images: torch.Tensor, num_samples: int) -> tuple[torch.Tensor, ...]:
+        """
+        Draws physical-space posterior samples from normalized z-stacks.
+        Only supported by certain subclasses.
 
-        if isinstance(dist, torch.distributions.MixtureSameFamily):
-            components = dist.component_distribution
-            return torch.distributions.MixtureSameFamily(
-                dist.mixture_distribution,
-                torch.distributions.MultivariateNormal(
-                    components.mean * scales + means,
-                    scale_tril=scales.unsqueeze(-1) * components.scale_tril,
-                ),
-            )
-        if isinstance(dist, torch.distributions.MultivariateNormal):
-            return torch.distributions.MultivariateNormal(
-                dist.mean * scales + means,
-                scale_tril=scales.unsqueeze(-1) * dist.scale_tril,
-            )
-        if isinstance(dist, torch.distributions.Independent):
-            marginals = torch.distributions.Normal(
-                dist.base_dist.mean * scales + means, dist.base_dist.stddev * scales
-            )
-            return torch.distributions.Independent(marginals, reinterpreted_batch_ndims=1)
-        raise TypeError(f"Cannot unwhiten a {type(dist).__name__}")
+        Arguments:
+        - images: [B, Z, H, W] batch of normalized z-stacks
+        - num_samples: posterior samples to draw per z-stack
+        Returns:
+        - one [B, num_samples, N_coefs] tensor per CoefficientBlock
+        """
+        whitened = self.head.whitened_samples(self.forward(images), num_samples)
+        return self.coefficients.unwhiten_to_blocks(self.coefficients.scatter_nonpinned(whitened))
 
     # PTL training methods
 
