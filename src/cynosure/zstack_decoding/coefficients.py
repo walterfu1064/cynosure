@@ -242,6 +242,16 @@ class CoefficientSpace(nn.Module):
         """Unwhitens a [..., N_tot] estimate and splits it into physical per-block coefficients"""
         return self.split(self.unwhiten(whitened))
 
+    @property
+    def nonpinned_means(self) -> torch.Tensor:
+        """[N_kept,] whitening offsets, for posteriors that live over the non-pinned coefs only"""
+        return self.target_means[~self.is_pinned]
+
+    @property
+    def nonpinned_scales(self) -> torch.Tensor:
+        """[N_kept,] whitening scales, for posteriors that live over the non-pinned coefs only"""
+        return self.target_scales[~self.is_pinned]
+
     # Sampling
 
     def sample(

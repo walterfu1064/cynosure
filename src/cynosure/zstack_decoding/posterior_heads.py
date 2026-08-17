@@ -4,6 +4,11 @@ Output heads that predict the coefficient posteriors in various ways.
 Each PosteriorHead builds its own network, decides how to interpret that network's
 outputs, and handles its own loss calculations and validation metrics.
 
+By and large, the ZstackSolver should only worry about two or three call sites:
+- `losses` -> called during training
+- `whitened_means` -> called during training, or during inference if MLE
+- `distribution` -> called during inference (if head type predicts a closed-form posterior)
+
 Bit of hackiness: each PosteriorHead holds a reference to the CoefficientSpace
 it predicts over, but deliberately doesn't register it as a child module, since
 the StackSimulator owns it and will already include it in the state dict.
@@ -145,8 +150,44 @@ class PosteriorHead(nn.Module, ABC):
         return {}
 
     def whitened_distribution(self, encoded: torch.Tensor) -> torch.distributions.Distribution:
-        """Posterior of non-pinned coefs in whitened space; subclasses should implement if exists"""
+        """
+        Posterior of non-pinned coefs in whitened space.
+        Subclasses that predict a posterior distribution should implement this.
+
+        Losses and metrics will use this during training.
+        For inference, callers should use `distribution`.
+        """
         raise NotImplementedError(f"{type(self).__name__} has no closed-form posterior density")
+
+    def distribution(self, encoded: torch.Tensor) -> torch.distributions.Distribution:
+        """
+        Posterior of the non-pinned coefs in physical space.
+        Subclasses that predict a posterior distribution should implement this.
+
+        Callers should use this to get the predicted coef distributions.
+        Losses and metrics will instead use `whitened_distribution`.
+        """
+        raise NotImplementedError(f"{type(self).__name__} has no closed-form posterior density")
+
+    def whitened_samples(self, encoded: torch.Tensor, num_samples: int) -> torch.Tensor:
+        """
+        Draws [B, S, N_kept] whitened posterior samples.
+
+        Subclasses with a closed-form density can use this for free.
+        Others should either override (e.g., flow matching) or inherit the raise above (e.g., MLE).
+        """
+        return self.whitened_distribution(encoded).sample((num_samples,)).movedim(0, 1)
+
+    def _unwhiten_normal(
+            self,
+            whitened: torch.distributions.MultivariateNormal,
+    ) -> torch.distributions.MultivariateNormal:
+        """Maps a whitened multivariate Gaussian over the non-pinned coefs into physical space"""
+        scales = self.coefficients.nonpinned_scales
+        return torch.distributions.MultivariateNormal(
+            whitened.mean * scales + self.coefficients.nonpinned_means,
+            scale_tril=scales.unsqueeze(-1) * whitened.scale_tril,
+        )
 
     # Convenience accessors onto the CoefficientSpace, used by subclasses
 
@@ -244,6 +285,15 @@ class HeteroscedasticHead(PosteriorHead):
         marginals = torch.distributions.Normal(dist.mean[:, keep], dist.stddev[:, keep])
         return torch.distributions.Independent(marginals, reinterpreted_batch_ndims=1)
 
+    def distribution(self, encoded: torch.Tensor) -> torch.distributions.Independent:
+        """Unwhitens the diagonal Gaussian into physical coefficient space"""
+        whitened = self.whitened_distribution(encoded).base_dist
+        scales, means = self.coefficients.nonpinned_scales, self.coefficients.nonpinned_means
+        marginals = torch.distributions.Normal(
+            whitened.mean * scales + means, whitened.stddev * scales
+        )
+        return torch.distributions.Independent(marginals, reinterpreted_batch_ndims=1)
+
 
 class CovarianceHead(PosteriorHead):
     """
@@ -284,6 +334,10 @@ class CovarianceHead(PosteriorHead):
         means = self.whitened_means(encoded)[:, self._keep]
         scale_tril = self.cholesky.to_scale_tril(encoded[:, self.coefficients.num_coefs:])
         return torch.distributions.MultivariateNormal(means, scale_tril=scale_tril)
+
+    def distribution(self, encoded: torch.Tensor) -> torch.distributions.MultivariateNormal:
+        """Unwhitens the joint Gaussian into physical coefficient space"""
+        return self._unwhiten_normal(self.whitened_distribution(encoded))
 
     def losses(
             self,
@@ -400,6 +454,14 @@ class MixtureHead(PosteriorHead):
         )
         weights = torch.distributions.Categorical(logits=logits)
         return torch.distributions.MixtureSameFamily(weights, components)
+
+    def distribution(self, encoded: torch.Tensor) -> torch.distributions.MixtureSameFamily:
+        """Unwhitens the mixture into physical coefficient space, weights unchanged"""
+        whitened = self.whitened_distribution(encoded)
+        return torch.distributions.MixtureSameFamily(
+            whitened.mixture_distribution,
+            self._unwhiten_normal(whitened.component_distribution),
+        )
 
     def _mixing_logits(self, logits: torch.Tensor, epoch: int) -> torch.Tensor:
         """
