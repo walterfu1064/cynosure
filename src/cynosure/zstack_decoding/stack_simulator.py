@@ -56,7 +56,7 @@ class StackSimulator(nn.Module):
             z_objective = torch.full((1,), fill_value=z_jitter, dtype=self.ftype)
         self.register_buffer("z_objective", z_objective.to(self.ftype))
         self.register_buffer("defocus_phase_coefs", defocus_phase_coefs)
-        self.num_z = z_objective.shape[0]
+        self.num_z: int = int(z_objective.shape[0])
         self.z_jitter = float(z_jitter)  # plain float: consumers do ordinary arithmetic on it
 
     @classmethod

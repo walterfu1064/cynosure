@@ -141,9 +141,9 @@ class CoefficientSpace(nn.Module):
             self.register_buffer(f"is_{block.name}_pinned", block.pinned_mask)
         self.register_buffer("is_pinned", torch.cat([block.pinned_mask for block in self.blocks], dim=0))
 
-        self.block_sizes = tuple(block.size for block in self.blocks)
-        self.num_coefs = sum(self.block_sizes)
-        self.num_nonpinned_coefs = int((~self.is_pinned).sum())
+        self.block_sizes: tuple[int, ...] = tuple(block.size for block in self.blocks)
+        self.num_coefs: int = sum(self.block_sizes)
+        self.num_nonpinned_coefs: int = int((~self.is_pinned).sum())
 
         # matmul form of the scatter so masking can be done without an in-place write
         self.register_buffer(
