@@ -3,31 +3,19 @@ from typing import Optional
 import numpy as np
 import torch
 
-from cynosure.zstack_decoding import ZstackSolver
 from cynosure.zstack_decoding.noise_model import scale_to_photon_counts
-
-
-def nonpiston_basis(solver: ZstackSolver) -> torch.Tensor:
-    """
-    Returns a [C, C_kept] matrix scattering the non-piston coefs back into a full coef vector.
-
-    Full coefs can be obtained using `nonpiston_basis(solver) @ nonpiston_coefs`.
-    Needs to be matmul instead of masked write so it can batch in `vmap` which `jacfwd` uses.
-
-    TODO - add to ZstackSolver proper if this becomes more widely useful
-    """
-    identity = torch.eye(solver.num_coefs, dtype=solver.ftype, device=solver.device)
-    return identity[:, ~solver.is_piston]
+from cynosure.zstack_decoding.stack_simulator import StackSimulator
 
 
 def _resolve_noise_parameters(
-        solver: ZstackSolver,
+        simulator: StackSimulator,
         photons: Optional[float],
         background: Optional[float],
 ) -> tuple[float, float, float]:
-    """Resolves (photons, background, read noise), falling back to the solver's `NoiseConfig` averages"""
-    if solver.noise_cfg:
-        defaults = (solver.noise_cfg.average_photons, solver.noise_cfg.average_background, solver.noise_cfg.read_noise)
+    """Resolves (photons, background, read noise), falling back to the `NoiseConfig` averages"""
+    if simulator.noise_cfg:
+        cfg = simulator.noise_cfg
+        defaults = (cfg.average_photons, cfg.average_background, cfg.read_noise)
     else:
         defaults = (1, 0, 0)
     return photons or defaults[0], background or defaults[1], defaults[2]
@@ -56,13 +44,13 @@ def simulate_image_as_photon_counts(
         z: torch.Tensor,
         photons: float,
         background: float,
-        solver: ZstackSolver,
+        simulator: StackSimulator,
 ) -> torch.Tensor:
     """
     Forwards-simulates a z-stack and normalizes it to raw photon counts.
 
     Arguments:
-    - coefs: [C_kept,], the non-piston coefficients, ordered as from `ZstackSolver.gather_nonpiston()`
+    - coefs: [C_kept,], the non-pinned coefficients, ordered as from `CoefficientSpace.gather_nonpinned()`
     - z: [Z,]
     - photons, background: scalars
     Returns:
@@ -70,14 +58,15 @@ def simulate_image_as_photon_counts(
     """
     num_z = z.shape[0]
 
-    full_coefs = solver.target_means + nonpiston_basis(solver) @ coefs  # target_means, not zeros as `scatter_nonpiston`
+    coefficients = simulator.coefficients
+    full_coefs = coefficients.target_means + coefficients.nonpinned_basis @ coefs
 
-    defocus = solver.propagator.defocus_from_objective_z(z)
-    phase_coefs, amp_coefs = solver.split_phase_amp(full_coefs)
+    defocus = simulator.propagator.defocus_from_objective_z(z)
+    phase_coefs, amp_coefs = coefficients.split(full_coefs)
     phase_coefs = phase_coefs.unsqueeze(0).expand(num_z, -1)
     amp_coefs = amp_coefs.unsqueeze(0).expand(num_z, -1)
-    psf = solver.propagator(defocus, phase_coefs, amp_coefs)  # [Z, H, W]
-    images = solver.object_distribution(psf.unsqueeze(0), batch_size=1).squeeze(0)
+    psf = simulator.propagator(defocus, phase_coefs, amp_coefs)  # [Z, H, W]
+    images = simulator.object_distribution(psf.unsqueeze(0), batch_size=1).squeeze(0)
     return scale_to_photon_counts(images, photons, background)
 
 
@@ -86,19 +75,19 @@ def calculate_image_jacobian(
         z: torch.Tensor,
         num_photons: float,
         background_level: float,
-        solver: ZstackSolver,
+        simulator: StackSimulator,
 ) -> torch.Tensor:
     """
-    Jacobian of the simulated z-stack with respect to each non-piston aberration coefficient.
+    Jacobian of the simulated z-stack with respect to each non-pinned aberration coefficient.
 
     Arguments:
-    - coefs: [C_kept,], the non-piston coefficients, ordered as from `ZstackSolver.gather_nonpiston()`
+    - coefs: [C_kept,], the non-pinned coefficients, ordered as from `CoefficientSpace.gather_nonpinned()`
     - z: [Z,]
     - num_photons, background_level: scalars
     Returns:
     - [Z, H, W, C_kept]
     """
-    jac = torch.func.jacfwd(simulate_image_as_photon_counts)(coefs, z, num_photons, background_level, solver)
+    jac = torch.func.jacfwd(simulate_image_as_photon_counts)(coefs, z, num_photons, background_level, simulator)
     return jac
 
 
@@ -107,14 +96,14 @@ def calculate_defocus_derivative(
         z: torch.Tensor,
         num_photons: float,
         background_level: float,
-        solver: ZstackSolver,
+        simulator: StackSimulator,
 ) -> tuple[torch.Tensor, torch.Tensor]:
     """
     Simulates a z-stack, then calculates its derivative with respect to each plane's defocus.
     JVP with a vector of ones is more efficient than a full `jacfwd` for this term.
 
     Arguments:
-    - coefs: [C_kept,], the non-piston coefficients, ordered as from `ZstackSolver.gather_nonpiston()`
+    - coefs: [C_kept,], the non-pinned coefficients, ordered as from `CoefficientSpace.gather_nonpinned()`
     - z: [Z,]
     - photons, background: scalars
     Returns:
@@ -122,43 +111,43 @@ def calculate_defocus_derivative(
     - its derivative with respect to objective z, [Z, H, W]
     """
     def simulate(plane_z: torch.Tensor) -> torch.Tensor:
-        return simulate_image_as_photon_counts(coefs, plane_z, num_photons, background_level, solver)
+        return simulate_image_as_photon_counts(coefs, plane_z, num_photons, background_level, simulator)
     return torch.func.jvp(simulate, (z,), (torch.ones_like(z),))
 
 
 def calculate_fisher_matrix(
         coefs: torch.Tensor,
         z: torch.Tensor,
-        solver: ZstackSolver,
+        simulator: StackSimulator,
         photons: Optional[float] = None,
         background: Optional[float] = None,
 ) -> tuple[torch.Tensor, torch.Tensor]:
     """
-    Simulates a z-stack, then calculates its Fisher matrix with respect to the non-piston aberration coefficients.
+    Simulates a z-stack, then calculates its Fisher matrix with respect to the non-pinned aberration coefficients.
 
     Arguments:
-    - coefs: [C_kept,], the free (non-piston) coefficients, as from `ZstackSolver.gather_nonpiston()`
+    - coefs: [C_kept,], the free (non-pinned) coefficients, as from `CoefficientSpace.gather_nonpinned()`
     - z: [Z,]
     - photons, background: scalars, use NoiseCfg averages if None
     Returns:
     - simulated z-stack, [Z, H, W]
     - Fisher matrix, [Z, C_kept, C_kept]
     """
-    photons, background, read_noise = _resolve_noise_parameters(solver, photons, background)
-    counts = simulate_image_as_photon_counts(coefs, z, photons, background, solver)
-    jac = calculate_image_jacobian(coefs, z, photons, background, solver)
+    photons, background, read_noise = _resolve_noise_parameters(simulator, photons, background)
+    counts = simulate_image_as_photon_counts(coefs, z, photons, background, simulator)
+    jac = calculate_image_jacobian(coefs, z, photons, background, simulator)
     return counts, _fisher_from_jacobian(counts, jac, read_noise)  # [Z, C_kept, C_kept]
 
 
 def calculate_augmented_fisher_matrix(
         coefs: torch.Tensor,
         z: torch.Tensor,
-        solver: ZstackSolver,
+        simulator: StackSimulator,
         photons: Optional[float] = None,
         background: Optional[float] = None,
 ) -> tuple[torch.Tensor, torch.Tensor]:
     """
-    Simulates a z-stack, then calculates its Fisher matrix with respect to both the non-piston aberration
+    Simulates a z-stack, then calculates its Fisher matrix with respect to both the non-pinned aberration
     coefficients and the defocus of each plane (in the final row+column).
 
     Defocus can be equivalently expressed in terms of the m=0 phase coefficients
@@ -166,78 +155,73 @@ def calculate_augmented_fisher_matrix(
     disantangle it from the "actual" m=0 aberrations.
 
     Arguments:
-    - coefs: [C_kept,], the free (non-piston) coefficients, as from `ZstackSolver.gather_nonpiston()`
+    - coefs: [C_kept,], the free (non-pinned) coefficients, as from `CoefficientSpace.gather_nonpinned()`
     - z: [Z,]
     - photons, background: scalars, use NoiseCfg averages if None
     Returns:
     - simulated z-stack, [Z, H, W]
     - Fisher matrix, [Z, C_kept+1, C_kept+1] (defocus as the last row+column)
     """
-    photons, background, read_noise = _resolve_noise_parameters(solver, photons, background)
-    coef_jacobian = calculate_image_jacobian(coefs, z, photons, background, solver)  # [Z, H, W, C_kept]
-    counts, defocus_derivative = calculate_defocus_derivative(coefs, z, photons, background, solver)
+    photons, background, read_noise = _resolve_noise_parameters(simulator, photons, background)
+    coef_jacobian = calculate_image_jacobian(coefs, z, photons, background, simulator)  # [Z, H, W, C_kept]
+    counts, defocus_derivative = calculate_defocus_derivative(coefs, z, photons, background, simulator)
     jacobian = torch.cat([coef_jacobian, defocus_derivative.unsqueeze(-1)], dim=-1)  # [Z, H, W, C_kept+1]
     return counts, _fisher_from_jacobian(counts, jacobian, read_noise)
 
 
-def defocus_direction(solver: ZstackSolver) -> torch.Tensor:
+def defocus_direction(simulator: StackSimulator) -> torch.Tensor:
     """
-    Returns the [C_kept,] non-piston phase aberrations equivalent to 1 um of objective-z displacement.
+    Returns the [C_kept,] non-pinned phase aberrations equivalent to 1 um of objective-z displacement.
     I.e., the "z" unit vector in phase aberration space.
-    Matches `ZstackSolver._z_jitter_to_phase_coefs`, restricted to the non-piston phase coefficients.
+    Matches `StackSimulator.z_offset_to_coefficients`, restricted to the non-pinned phase coefficients.
     """
-    dtype = solver.ftype
-    device = solver.device
+    coefficients = simulator.coefficients
+    dtype = simulator.ftype
+    device = simulator.device
     one = torch.tensor(1, dtype=dtype, device=device)  # less than 2, but a whole lot more than 0
-    phase_direction = solver.propagator.defocus_from_objective_z(one) * solver.defocus_phase_coefs
-    amp_direction = torch.zeros(solver.num_amp_coefs, dtype=dtype, device=device)  # just to pad the join-gather
-    return solver.gather_nonpiston(solver.join_phase_amp(phase_direction, amp_direction))
+    phase_direction = simulator.propagator.defocus_from_objective_z(one) * simulator.defocus_phase_coefs
+    amp_direction = torch.zeros(  # just to pad the join-gather
+        coefficients.block_size("amp"), dtype=dtype, device=device
+    )
+    return coefficients.gather_nonpinned(coefficients.join(phase_direction, amp_direction))
 
 
-def _uniform_z_jitter_variance(solver: ZstackSolver) -> float:
+def _uniform_z_jitter_variance(simulator: StackSimulator) -> float:
     """Variance of the z-jitter, which is uniform over [-z_jitter, +z_jitter]"""
-    return solver.z_jitter ** 2 / 3
+    return simulator.z_jitter ** 2 / 3
 
 
-def coefficient_prior_covariance(solver: ZstackSolver, include_jitter: bool = True) -> np.ndarray:
+def coefficient_prior_covariance(simulator: StackSimulator, include_jitter: bool = True) -> np.ndarray:
     """
-    Returns the [C_kept, C_kept] prior covariance over the non-piston coefficients.
+    Returns the [C_kept, C_kept] prior covariance over the non-pinned coefficients.
 
     The prior is diagonal (see `PriorConfig`), but z-jitter couples across the m=0 coefficients.
     If `include_jitter=True`, adds those terms to the covariance, along the diagonal.
     Else, models the aberrations alone, with the z-positions taken to be known.
-
-    TODO - This duplicates parts of `ZstackSolver._setup_whitening()`. Probably refactor and consolidate.
     """
-
-    phase_nm = solver.propagator.phase_projector.nm_indices
-    phase_scales = solver.phase_prior_cfg.coef_scales(phase_nm)
-    amp_nm = solver.propagator.amp_projector.nm_indices
-    amp_scales = solver.amp_prior_cfg.coef_scales(amp_nm)
-    scales = torch.cat([phase_scales, amp_scales], dim=-1).to(solver.ftype)
-
-    sigmas = solver.gather_nonpiston(scales).numpy(force=True)
+    coefficients = simulator.coefficients
+    sigmas = coefficients.gather_nonpinned(coefficients.prior_scales).numpy(force=True)  # not jitter-widened yet
     covariance = np.diag(sigmas ** 2)
 
-    if include_jitter and solver.z_jitter > 0:
-        direction = defocus_direction(solver).numpy(force=True)
-        covariance = covariance + _uniform_z_jitter_variance(solver) * np.outer(direction, direction)
+    if include_jitter and simulator.z_jitter > 0:
+        direction = defocus_direction(simulator).numpy(force=True)
+        covariance = covariance + _uniform_z_jitter_variance(simulator) * np.outer(direction, direction)
 
     return covariance
 
 
-def augmented_prior_covariance(solver: ZstackSolver) -> np.ndarray:
+def augmented_prior_covariance(simulator: StackSimulator) -> np.ndarray:
     """
     Extends the output of `coefficient_prior_covariance`, adding z along the last row+column.
     Returns as a [C_kept+1, C_kept+1] covariance matrix matching `calculate_augmented_fisher_matrix()`.
     """
-    if solver.z_jitter <= 0:
+    if simulator.z_jitter <= 0:
         raise ValueError("z_jitter = 0, so z is exactly known, use `coefficient_prior_covariance`")
 
-    num_coefs = solver.num_nonpiston_coefs
+    num_coefs = simulator.coefficients.num_nonpinned_coefs
     covariance = np.zeros((num_coefs + 1, num_coefs + 1))
-    covariance[:num_coefs, :num_coefs] = coefficient_prior_covariance(solver, include_jitter=False)
-    covariance[num_coefs, num_coefs] = _uniform_z_jitter_variance(solver)
+    covariance[:num_coefs, :num_coefs] = coefficient_prior_covariance(simulator, include_jitter=False)
+    covariance[num_coefs, num_coefs] = _uniform_z_jitter_variance(simulator)
     return covariance
 
 
