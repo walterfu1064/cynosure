@@ -16,7 +16,7 @@ from typing import Optional
 import torch
 import torch.nn as nn
 
-from ..config import SimulationConfig
+from ..config import BlobPriorConfig, SimulationConfig
 from ..utilities.fft_utilities import next_power_of_2
 
 
@@ -63,6 +63,19 @@ class ObjectDistribution(nn.Module, ABC):
     @property
     def fft_shape(self) -> tuple[int, int]:
         return self.fft_size, self.fft_size
+
+    @property
+    def extent(self) -> float:
+        """Extent of the object grid, in physical units"""
+        return self.size * self.sim_cfg.object_pixel_size
+
+    @property
+    def num_params(self) -> int:
+        """
+        Number of sampled parameters this distribution reports as training labels.
+        Zero unless the subclass draws its objects stochastically and overrides this.
+        """
+        return 0
 
     @abstractmethod
     def sample(
@@ -240,7 +253,47 @@ class ParametricBead(ObjectDistribution):
         return self._repeat_static(bead, batch_size)
 
 
-class KBlobs(ObjectDistribution):
+class SupergaussianBlobs(ObjectDistribution):
+    """
+    Abstract shared machinery for objects composed of supergaussian blobs.
+
+    Holds the coordinate grid and the blob rasterizer that `KBlobs` (fitted) and
+    `SampledBlobs` (prior-sampled) both draw on.
+    """
+
+    def __init__(self, sim_cfg: SimulationConfig):
+        super().__init__(sim_cfg)
+        coords = (
+            (torch.arange(self.size, dtype=self.sim_cfg.ftype) - self.size // 2)
+            * self.sim_cfg.object_pixel_size
+        )
+        self.register_buffer("coords", coords, persistent=False)  # for rendering, in physical units
+
+    def _render(
+            self,
+            row_positions: torch.Tensor,
+            col_positions: torch.Tensor,
+            diameters: torch.Tensor,
+            amplitudes: torch.Tensor,
+    ) -> torch.Tensor:
+        """
+        Rasterizes the blobs and combines them with the probabilistic union.
+
+        Argument are each [..., K].
+        Returns [..., H, W] normalized to unity sum.
+        """
+        dy = self.coords - row_positions[..., None]  # [..., K, H]
+        dx = self.coords - col_positions[..., None]  # [..., K, W]
+        r_squared = dy[..., :, None].square() + dx[..., None, :].square()  # [..., K, H, W]
+        half_width_squared = (diameters[..., None, None] / 2).square()
+        blobs = amplitudes[..., None, None] * torch.exp(
+            -math.log(2) * (r_squared / half_width_squared).square()
+        )  # supergaussian exp(-x^4)
+        field = 1 - torch.prod(1 - blobs, dim=-3)  # [..., H, W]
+        return field / field.sum(dim=(-2, -1), keepdim=True)
+
+
+class KBlobs(SupergaussianBlobs):
     """
     An extended object formed by K fitted supergaussian blobs, each with its own
     amplitude (within [0, 1]), diameter (defined as FWHM), and position on the object grid.
@@ -275,12 +328,6 @@ class KBlobs(ObjectDistribution):
         self.row_position_logits = nn.Parameter(self._initial_position_logits(rng))
         self.col_position_logits = nn.Parameter(self._initial_position_logits(rng))
 
-        coords = (
-            (torch.arange(self.size, dtype=self.sim_cfg.ftype) - self.size // 2)
-            * self.sim_cfg.object_pixel_size
-        )
-        self.register_buffer("coords", coords)  # store for rendering later on, in physical units
-
     def _initial_position_logits(self, generator: Optional[torch.Generator] = None) -> torch.Tensor:
         """Creates random position logits with a given spread for an asymmetric initialization"""
         noise = torch.randn(self.num_blobs, generator=generator, dtype=self.sim_cfg.ftype)
@@ -297,11 +344,6 @@ class KBlobs(ObjectDistribution):
         return self.initial_diameter * torch.exp(self.diameter_logits)
 
     @property
-    def extent(self) -> float:
-        """Extent of the object grid, in physical units"""
-        return self.size * self.sim_cfg.object_pixel_size
-
-    @property
     def row_positions(self) -> torch.Tensor:
         """Converts the row position logits to physical-unit offsets from the grid center"""
         return (torch.sigmoid(self.row_position_logits) - 0.5) * self.extent
@@ -310,29 +352,6 @@ class KBlobs(ObjectDistribution):
     def col_positions(self) -> torch.Tensor:
         """Converts the column position logits to physical-unit offsets from the grid center"""
         return (torch.sigmoid(self.col_position_logits) - 0.5) * self.extent
-
-    def _render(
-            self,
-            row_positions: torch.Tensor,
-            col_positions: torch.Tensor,
-            diameters: torch.Tensor,
-            amplitudes: torch.Tensor,
-    ) -> torch.Tensor:
-        """
-        Rasterizes the blobs and combines them with the probabilistic union.
-
-        Argument are each [..., K].
-        Returns [..., H, W] normalized to unity sum.
-        """
-        dy = self.coords - row_positions[..., None]  # [..., K, H]
-        dx = self.coords - col_positions[..., None]  # [..., K, W]
-        r_squared = dy[..., :, None].square() + dx[..., None, :].square()  # [..., K, H, W]
-        half_width_squared = (diameters[..., None, None] / 2).square()
-        blobs = amplitudes[..., None, None] * torch.exp(
-            -math.log(2) * (r_squared / half_width_squared).square()
-        )  # supergaussian exp(-x^4)
-        field = 1 - torch.prod(1 - blobs, dim=-3)  # [..., H, W]
-        return field / field.sum(dim=(-2, -1), keepdim=True)
 
     @property
     def field(self) -> torch.Tensor:
@@ -349,6 +368,109 @@ class KBlobs(ObjectDistribution):
         Deterministic given the fitted blob parameters, so `generator` is unused.
         """
         return self._repeat_static(self.field, batch_size)
+
+
+class SampledBlobs(SupergaussianBlobs):
+    """
+    An extended object formed by up to K supergaussian blobs with prior-sampled parameters.
+    The stochastic sibling of `KBlobs`.
+
+    Instead of holding fitted parameters, provides functions for sampling fresh blob
+    parameters for each element in a batch, so a decoder can be trained on its outputs.
+    The parameters are sampled from an unconstrained label space with a Gaussian prior,
+    set by the `BlobPriorConfig`.
+
+    Blobs are canonically ordered by descending amplitude, with the brightest pinned to
+    exactly 1 and its logit dropped from the labels (since absolute brightness will get
+    pinned by the unit-sum normalization).
+    """
+    def __init__(
+            self,
+            sim_cfg: SimulationConfig,
+            num_blobs: int,
+            prior_cfg: BlobPriorConfig,
+    ):
+        super().__init__(sim_cfg)
+        if num_blobs < 1:
+            raise ValueError(f"`SampledBlobs` requires at least one blob, got {num_blobs}")
+        self.num_blobs = num_blobs
+        self.prior_cfg = prior_cfg
+
+    @property
+    def num_params(self) -> int:
+        """{amplitude, row, column, diameter} = 4 dofs per blob, minus 1 for the pinned max amplitude"""
+        return 4 * self.num_blobs - 1
+
+    @property
+    def param_labels(self) -> list[str]:
+        """Human-readable names for the label vector entries, in label order"""
+        return (
+                [f"row_{k}" for k in range(self.num_blobs)]
+                + [f"col_{k}" for k in range(self.num_blobs)]
+                + [f"log_diam_{k}" for k in range(self.num_blobs)]
+                + [f"amp_logit_{k}" for k in range(1, self.num_blobs)]
+        )
+
+    @property
+    def param_scales(self) -> torch.Tensor:
+        """Per-parameter prior RMS, for whitening the labels"""
+        return self.prior_cfg.param_scales(self.num_blobs).to(self.coords)
+
+    def sample_params(
+            self,
+            batch_size: int = 1,
+            generator: Optional[torch.Generator] = None,
+    ) -> torch.Tensor:
+        """
+        Draws a [B, 4K - 1] batch of blob params, ordered as [rows..., cols..., diams..., amps_sans_one...].
+        Blobs are canonically sorted by descending amplitude logit.
+        """
+        draws = torch.randn(
+            batch_size, self.num_params,
+            generator=generator, dtype=self.sim_cfg.ftype, device=self.coords.device,
+        )
+        K = self.num_blobs
+        params = draws * self.param_scales
+        amp_logits, _ = torch.sort(params[..., 3*K:], dim=-1, descending=True)
+        return torch.cat([params[..., :3*K], amp_logits], dim=-1)
+
+    def params_to_blobs(
+            self,
+            params: torch.Tensor,
+    ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
+        """
+        Maps [..., 4K - 1] label-space parameters to physical blob parameters for `_render`.
+        """
+        K = self.num_blobs
+        rows = params[..., :K]
+        cols = params[..., K:2*K]
+        diameters = self.prior_cfg.reference_diameter * torch.exp(params[..., 2*K:3*K])
+        pinned = torch.ones_like(params[..., :1])  # the brightest blob's amplitude
+        amplitudes = torch.cat([pinned, torch.sigmoid(params[..., 3*K:])], dim=-1)
+        return rows, cols, diameters, amplitudes
+
+    def sample_with_params(
+            self,
+            batch_size: int = 1,
+            generator: Optional[torch.Generator] = None,
+    ) -> tuple[torch.Tensor, torch.Tensor]:
+        """
+        Draws fresh blob parameters and renders them.
+        Returns [B, 1, H, W] rendered objects and their [B, 4K - 1] label-space parameters.
+        """
+        params = self.sample_params(batch_size, generator)
+        field = self._render(*self.params_to_blobs(params))
+        return field.unsqueeze(1), params
+
+    def sample(
+            self,
+            batch_size: int = 1,
+            generator: Optional[torch.Generator] = None,
+    ) -> torch.Tensor:
+        """
+        Returns a [B, 1, H, W] batch of independently drawn objects.
+        """
+        return self.sample_with_params(batch_size, generator)[0]
 
 
 ### Setting aside the below for now, since on reflection, it's a really bad parameterization.

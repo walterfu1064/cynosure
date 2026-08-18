@@ -12,6 +12,7 @@ from typing import Literal, Optional, Sequence
 import torch
 
 from cynosure.config import (
+    BlobPriorConfig,
     MixtureConfig,
     NoiseConfig,
     OpticalConfig,
@@ -123,6 +124,20 @@ def get_default_amplitude_prior(
     decay_order: int = 2,
 ) -> PriorConfig:
     return PriorConfig(base_rms=base_rms, decay_order=decay_order)
+
+
+def get_default_blob_prior(
+        position_sigma: float = 1.0,
+        reference_diameter: float = 0.6,
+        log_diameter_sigma: float = 0.4,
+        amplitude_logit_sigma: float = 2.0,
+) -> BlobPriorConfig:
+    return BlobPriorConfig(
+        position_sigma=position_sigma,
+        reference_diameter=reference_diameter,
+        log_diameter_sigma=log_diameter_sigma,
+        amplitude_logit_sigma=amplitude_logit_sigma,
+    )
 
 
 def get_default_noise_config(

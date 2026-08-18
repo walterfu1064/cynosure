@@ -87,6 +87,37 @@ class PriorConfig:
 
 
 @dataclass(frozen=True, slots=True)
+class BlobPriorConfig:
+    """
+    Defines statistics for a prior distribution over `SampledBlobs` parameters.
+
+    Each blob is parameterized by its center row, center column, FWHM diameter, and amplitude.
+    Positions are represented by their offsets from the grid center, diameter by its
+    natural log, and amplitude by its pre-sigmoid logit. Each such representation is taken
+    to be Gaussian about zero, with an RMS as defined here.
+    """
+    position_sigma: float  # physical units
+    reference_diameter: float  # physical units
+    log_diameter_sigma: float
+    amplitude_logit_sigma: float
+
+    def param_scales(self, num_blobs: int) -> torch.Tensor:
+        """
+        Returns the per-parameter prior RMS, in label order [row, col, log-diam, amp-logit].
+
+        Blobs are canonically ordered by descending amplitude, with the brightest pinned to
+        exactly 1 and its logit dropped from the labels (since absolute brightness will get
+        pinned by the unit-sum normalization).
+        """
+        return torch.cat([
+            torch.full((num_blobs,), self.position_sigma),
+            torch.full((num_blobs,), self.position_sigma),
+            torch.full((num_blobs,), self.log_diameter_sigma),
+            torch.full((num_blobs - 1,), self.amplitude_logit_sigma),
+        ])
+
+
+@dataclass(frozen=True, slots=True)
 class NoiseConfig:
     """
     Noise model to be applied to clean, simulated images.
