@@ -4,10 +4,14 @@ Output heads that predict the coefficient posteriors in various ways.
 Each PosteriorHead builds its own network, decides how to interpret that network's
 outputs, and handles its own loss calculations and validation metrics.
 
-By and large, the ZstackSolver should only worry about two or three call sites:
+By and large, the ZstackSolver should only worry about a handful of call sites:
 - `losses` -> called during training
 - `whitened_means` -> called during training, or during inference if MLE
 - `distribution` -> called during inference (if head type predicts a closed-form posterior)
+- `whitened_samples` -> called during inference (if head type can be sampled from)
+
+`FlowMatchingHead` lives in its own module, since it needs a velocity field and an
+ODE solver that no other head has any use for.
 
 Bit of hackiness: each PosteriorHead holds a reference to the CoefficientSpace
 it predicts over, but deliberately doesn't register it as a child module, since
@@ -95,7 +99,7 @@ class PosteriorHead(nn.Module, ABC):
 
     Nothing outside the PosteriorHead should try to interpreting the outputs
     of `forward`. Instead, external callers should access `whitened_means`,
-    `whitened_distribution`, or `losses`.
+    `whitened_distribution`, `whitened_samples`, or `losses`.
 
     Very specifically does not register the CoefficientSpace as a child, since the
     StackSimulator already owns it, else the state dict would register it twice.
@@ -528,21 +532,3 @@ class MixtureHead(PosteriorHead):
         metrics["best_component_rmse"] = component_mse.amin(dim=1).mean().sqrt()
 
         return metrics
-
-
-class FlowMatchingHead(PosteriorHead):
-    """
-    Predicts a conditional velocity field that transports a standard normal distribution
-    into the posterior over aberration coefficients, given a z-stack.
-
-    Unlike the mixture model, the posterior is represented implicitly: there is no closed-form
-    density, only the ability to draw samples by integrating the learned ODE. In exchange the
-    training objective is a plain regression, so none of the mixture's failure modes
-    (collapsing weights, covariance-preconditioned mean gradients) apply.
-
-    The flow lives in whitened space over the non-piston coefficients, where the
-    sampling prior is already close to a standard normal, to make its job easier.
-    """
-    def __init__(self):
-        raise NotImplementedError("I don't want to deal with this right now")
-

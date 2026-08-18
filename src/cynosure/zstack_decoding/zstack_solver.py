@@ -30,6 +30,7 @@ import torch.nn as nn
 from torch.utils.data import DataLoader, TensorDataset
 
 from .coefficients import CoefficientSpace
+from .flow_matching_head import FlowMatchingHead
 from .noise_model import NoiseModel
 from .posterior_heads import (
     CovarianceHead,
@@ -49,9 +50,11 @@ from ..config import (
     PriorConfig,
     SimulationConfig,
     TrainingConfig,
+    VelocityConfig,
     ZernikeConfig,
 )
 from ..object_distribution import ObjectDistribution
+from ..utilities.ode_solvers import ODESolver
 
 
 class ZstackSolver(pl.LightningModule):
@@ -349,5 +352,32 @@ class ZstackSolver_MixedDensity(ZstackSolver):
 
 
 class ZstackSolver_FlowMatching(ZstackSolver):
-    def __init__(self):
-        raise NotImplementedError  # TODO - this is going to be its own mess
+    """
+    Trains a conditional velocity field that transports a standard normal into the posterior
+    over the aberration coefficients, so multimodal posteriors can be represented.
+
+    Posterior distribution is not solved in closed-form. Instead, `predict_samples` draws
+    from the distribution and then integrates it out to a sample from the posterior.
+    During validation, sampling is done over `num_val_samples` such samplings.
+
+    FlowMatchingHead constructor needs a VelocityConfig and ODESolver, so pass them
+    bound to a partial function for `head_factory`.
+    """
+
+    def __init__(
+            self,
+            *,
+            vel_cfg: VelocityConfig,
+            num_val_samples: int = 64,
+            ode_solver: Optional[ODESolver] = None,
+            **kwargs,
+    ):
+        super().__init__(
+            head_factory=partial(
+                FlowMatchingHead,
+                cfg=vel_cfg,
+                num_val_samples=num_val_samples,
+                ode_solver=ode_solver,
+            ),
+            **kwargs,
+        )
