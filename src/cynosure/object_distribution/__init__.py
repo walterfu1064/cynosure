@@ -3,7 +3,7 @@ from .object_distribution import (
     FixedBead,
     ParametricBead,
     KBlobs,
-    SampledBlobs,
+    SampledKBlobs,
     # FixedObject,
     # FreeField,
     # PriorSampledObject,

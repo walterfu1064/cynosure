@@ -258,7 +258,7 @@ class SupergaussianBlobs(ObjectDistribution):
     Abstract shared machinery for objects composed of supergaussian blobs.
 
     Holds the coordinate grid and the blob rasterizer that `KBlobs` (fitted) and
-    `SampledBlobs` (prior-sampled) both draw on.
+    `SampledKBlobs` (prior-sampled) both draw on.
     """
 
     def __init__(self, sim_cfg: SimulationConfig):
@@ -370,7 +370,7 @@ class KBlobs(SupergaussianBlobs):
         return self._repeat_static(self.field, batch_size)
 
 
-class SampledBlobs(SupergaussianBlobs):
+class SampledKBlobs(SupergaussianBlobs):
     """
     An extended object formed by up to K supergaussian blobs with prior-sampled parameters.
     The stochastic sibling of `KBlobs`.
@@ -392,7 +392,7 @@ class SampledBlobs(SupergaussianBlobs):
     ):
         super().__init__(sim_cfg)
         if num_blobs < 1:
-            raise ValueError(f"`SampledBlobs` requires at least one blob, got {num_blobs}")
+            raise ValueError(f"`SampledKBlobs` requires at least one blob, got {num_blobs}")
         self.num_blobs = num_blobs
         self.prior_cfg = prior_cfg
 

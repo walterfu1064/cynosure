@@ -89,7 +89,7 @@ class PriorConfig:
 @dataclass(frozen=True, slots=True)
 class BlobPriorConfig:
     """
-    Defines statistics for a prior distribution over `SampledBlobs` parameters.
+    Defines statistics for a prior distribution over `SampledKBlobs` parameters.
 
     Each blob is parameterized by its center row, center column, FWHM diameter, and amplitude.
     Positions are represented by their offsets from the grid center, diameter by its
