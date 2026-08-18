@@ -424,6 +424,7 @@ class SampledKBlobs(SupergaussianBlobs):
         """
         Draws a [B, 4K - 1] batch of blob params, ordered as [rows..., cols..., diams..., amps_sans_one...].
         Blobs are canonically sorted by descending amplitude logit.
+        Position offsets are clamped so the blob centers are always at least 1 pixel from the edge.
         """
         draws = torch.randn(
             batch_size, self.num_params,
@@ -431,6 +432,8 @@ class SampledKBlobs(SupergaussianBlobs):
         )
         K = self.num_blobs
         params = draws * self.param_scales
+        positions = params[..., :2*K]
+        positions.clamp_(-(self.extent//2) + 1, self.extent//2 - 1)
         amp_logits, _ = torch.sort(params[..., 3*K:], dim=-1, descending=True)
         return torch.cat([params[..., :3*K], amp_logits], dim=-1)
 
