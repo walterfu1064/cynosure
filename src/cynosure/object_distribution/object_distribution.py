@@ -166,6 +166,36 @@ class FixedBead(ObjectDistribution):
         return self._repeat_static(self._object_distribution, batch_size)
 
 
+class FixedObject(ObjectDistribution):
+    """A known, but arbitrary, object distribution, supplied directly as a [H, W] tensor"""
+    def __init__(
+            self,
+            sim_cfg: SimulationConfig,
+            object_distribution: torch.Tensor,
+    ):
+        super().__init__(sim_cfg)
+        if object_distribution.ndim != 2:
+            raise ValueError(f"Object distribution must be [H, W], got {tuple(object_distribution.shape)}")
+        if tuple(object_distribution.shape) != self.shape:
+            raise ValueError(
+                f"Object distribution shape {tuple(object_distribution.shape)} "
+                f"does not match the object grid {self.shape}"
+            )
+
+        self.register_buffer("_object_distribution", object_distribution.to(sim_cfg.ftype))
+
+    def sample(
+            self,
+            batch_size: int = 1,
+            generator: Optional[torch.Generator] = None,
+    ) -> torch.Tensor:
+        """
+        Returns the stored distribution, repeated to [B, 1, H, W].
+        Deterministic, so `generator` is unused.
+        """
+        return self._repeat_static(self._object_distribution, batch_size)
+
+
 class ParametricBead(ObjectDistribution):
     """A uniform, circular bead of fitted diameter (defined as FWHM)"""
     def __init__(
@@ -210,68 +240,104 @@ class ParametricBead(ObjectDistribution):
         return self._repeat_static(bead, batch_size)
 
 
-class FixedObject(ObjectDistribution):
-    """A known, but arbitrary, object distribution, supplied directly as a [H, W] tensor"""
-    def __init__(
-            self,
-            sim_cfg: SimulationConfig,
-            object_distribution: torch.Tensor,
-    ):
-        super().__init__(sim_cfg)
-        if object_distribution.ndim != 2:
-            raise ValueError(f"Object distribution must be [H, W], got {tuple(object_distribution.shape)}")
-        if tuple(object_distribution.shape) != self.shape:
-            raise ValueError(
-                f"Object distribution shape {tuple(object_distribution.shape)} "
-                f"does not match the object grid {self.shape}"
-            )
-
-        self.register_buffer("_object_distribution", object_distribution.to(sim_cfg.ftype))
-
-    def sample(
-            self,
-            batch_size: int = 1,
-            generator: Optional[torch.Generator] = None,
-    ) -> torch.Tensor:
-        """
-        Returns the stored distribution, repeated to [B, 1, H, W].
-        Deterministic, so `generator` is unused.
-        """
-        return self._repeat_static(self._object_distribution, batch_size)
-
-
-class FreeField(ObjectDistribution):
+class KBlobs(ObjectDistribution):
     """
-    An unconstrained, fittable object distribution.
+    An extended object formed by K fitted supergaussian blobs, each with its own
+    amplitude (within [0, 1]), diameter (defined as FWHM), and position on the object grid.
 
-    Represents the object as a tensor of logits on the object grid.
-    Sigmoiding and then normalizing to unity sum (to match the pinned amplitude piston)
-    yields the object distribution itself, for convolving with the PSF.
+    Blobs are rendered into a single object distribution via the probabilistic union,
+    which is then normalized to unity sum to match the unity-pinned amplitude piston.
     """
     def __init__(
             self,
             sim_cfg: SimulationConfig,
-            initial_speckle: float = 1.0e-3,
+            num_blobs: int,
+            initial_diameter: float = 1.0,
+            initial_spread: float = 1.0,
             rng: Optional[int | torch.Generator] = None,
     ):
         super().__init__(sim_cfg)
-        if initial_speckle < 0:
-            raise ValueError(f"Initial speckle must be non-negative, got {initial_speckle}")
-        self.initial_speckle = initial_speckle
+        if num_blobs < 1:
+            raise ValueError(f"`KBlobs` requires at least one blob, got {num_blobs}")
+        if initial_diameter <= 0:
+            raise ValueError(f"Initial diameter must be positive, got {initial_diameter}")
+        if initial_spread < 0:
+            raise ValueError(f"Initial spread must be non-negative, got {initial_spread}")
+
+        self.num_blobs = num_blobs
+        self.initial_diameter = initial_diameter
+        self.initial_spread = initial_spread
         if isinstance(rng, int):
             rng = torch.Generator().manual_seed(rng)
-        self.logits = nn.Parameter(self._initial_logits(rng))
 
-    def _initial_logits(self, generator: Optional[torch.Generator] = None) -> torch.Tensor:
-        """Logits for a uniform object plus a bit of speckle to break symmetry"""
-        noise = torch.randn(self.shape, generator=generator, dtype=self.sim_cfg.ftype)
-        return noise * self.initial_speckle
+        self.amplitude_logits = nn.Parameter(torch.zeros(num_blobs, dtype=self.sim_cfg.ftype))
+        self.diameter_logits = nn.Parameter(torch.zeros(num_blobs, dtype=self.sim_cfg.ftype))
+        self.row_position_logits = nn.Parameter(self._initial_position_logits(rng))
+        self.col_position_logits = nn.Parameter(self._initial_position_logits(rng))
+
+        coords = (
+            (torch.arange(self.size, dtype=self.sim_cfg.ftype) - self.size // 2)
+            * self.sim_cfg.object_pixel_size
+        )
+        self.register_buffer("coords", coords)  # store for rendering later on, in physical units
+
+    def _initial_position_logits(self, generator: Optional[torch.Generator] = None) -> torch.Tensor:
+        """Creates random position logits with a given spread for an asymmetric initialization"""
+        noise = torch.randn(self.num_blobs, generator=generator, dtype=self.sim_cfg.ftype)
+        return noise * self.initial_spread
+
+    @property
+    def amplitudes(self) -> torch.Tensor:
+        """Converts the amplitude logits to actual amplitudes"""
+        return torch.sigmoid(self.amplitude_logits)
+
+    @property
+    def diameters(self) -> torch.Tensor:
+        """Converts the diameter logits to FWHM diameters, in physical units"""
+        return self.initial_diameter * torch.exp(self.diameter_logits)
+
+    @property
+    def extent(self) -> float:
+        """Extent of the object grid, in physical units"""
+        return self.size * self.sim_cfg.object_pixel_size
+
+    @property
+    def row_positions(self) -> torch.Tensor:
+        """Converts the row position logits to physical-unit offsets from the grid center"""
+        return (torch.sigmoid(self.row_position_logits) - 0.5) * self.extent
+
+    @property
+    def col_positions(self) -> torch.Tensor:
+        """Converts the column position logits to physical-unit offsets from the grid center"""
+        return (torch.sigmoid(self.col_position_logits) - 0.5) * self.extent
+
+    def _render(
+            self,
+            row_positions: torch.Tensor,
+            col_positions: torch.Tensor,
+            diameters: torch.Tensor,
+            amplitudes: torch.Tensor,
+    ) -> torch.Tensor:
+        """
+        Rasterizes the blobs and combines them with the probabilistic union.
+
+        Argument are each [..., K].
+        Returns [..., H, W] normalized to unity sum.
+        """
+        dy = self.coords - row_positions[..., None]  # [..., K, H]
+        dx = self.coords - col_positions[..., None]  # [..., K, W]
+        r_squared = dy[..., :, None].square() + dx[..., None, :].square()  # [..., K, H, W]
+        half_width_squared = (diameters[..., None, None] / 2).square()
+        blobs = amplitudes[..., None, None] * torch.exp(
+            -math.log(2) * (r_squared / half_width_squared).square()
+        )  # supergaussian exp(-x^4)
+        field = 1 - torch.prod(1 - blobs, dim=-3)  # [..., H, W]
+        return field / field.sum(dim=(-2, -1), keepdim=True)
 
     @property
     def field(self) -> torch.Tensor:
-        """The current [H, W] object distribution, non-negative with unity sum"""
-        field = torch.sigmoid(self.logits)
-        return field / field.sum()
+        """Returns the currently rendered [H, W] object distribution"""
+        return self._render(self.row_positions, self.col_positions, self.diameters, self.amplitudes)
 
     def sample(
             self,
@@ -279,12 +345,59 @@ class FreeField(ObjectDistribution):
             generator: Optional[torch.Generator] = None,
     ) -> torch.Tensor:
         """
-        Returns the current field, repeated to [B, 1, H, W].
-        Deterministic given the fitted logits, so `generator` is unused.
+        Returns the current union of blobs, repeated to [B, 1, H, W].
+        Deterministic given the fitted blob parameters, so `generator` is unused.
         """
         return self._repeat_static(self.field, batch_size)
 
 
-class PriorSampledObject(ObjectDistribution):
-    """TODO - will draw objects from a learned generative prior, if I get around to it"""
-    ...
+### Setting aside the below for now, since on reflection, it's a really bad parameterization.
+#
+# class FreeField(ObjectDistribution):
+#     """
+#     An unconstrained, fittable object distribution.
+#
+#     Represents the object as a tensor of logits on the object grid.
+#     Sigmoiding and then normalizing to unity sum (to match the pinned amplitude piston)
+#     yields the object distribution itself, for convolving with the PSF.
+#     """
+#     def __init__(
+#             self,
+#             sim_cfg: SimulationConfig,
+#             initial_speckle: float = 1.0e-3,
+#             rng: Optional[int | torch.Generator] = None,
+#     ):
+#         super().__init__(sim_cfg)
+#         if initial_speckle < 0:
+#             raise ValueError(f"Initial speckle must be non-negative, got {initial_speckle}")
+#         self.initial_speckle = initial_speckle
+#         if isinstance(rng, int):
+#             rng = torch.Generator().manual_seed(rng)
+#         self.logits = nn.Parameter(self._initial_logits(rng))
+#
+#     def _initial_logits(self, generator: Optional[torch.Generator] = None) -> torch.Tensor:
+#         """Logits for a uniform object plus a bit of speckle to break symmetry"""
+#         noise = torch.randn(self.shape, generator=generator, dtype=self.sim_cfg.ftype)
+#         return noise * self.initial_speckle
+#
+#     @property
+#     def field(self) -> torch.Tensor:
+#         """The current [H, W] object distribution, non-negative with unity sum"""
+#         field = torch.sigmoid(self.logits)
+#         return field / field.sum()
+#
+#     def sample(
+#             self,
+#             batch_size: int = 1,
+#             generator: Optional[torch.Generator] = None,
+#     ) -> torch.Tensor:
+#         """
+#         Returns the current field, repeated to [B, 1, H, W].
+#         Deterministic given the fitted logits, so `generator` is unused.
+#         """
+#         return self._repeat_static(self.field, batch_size)
+
+
+# class PriorSampledObject(ObjectDistribution):
+#     """TODO - will draw objects from a learned generative prior, if I get around to it"""
+#     ...
