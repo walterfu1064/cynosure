@@ -50,8 +50,8 @@ Several decoders are implemented, which model the posterior in increasingly thor
 - **Heteroscedastic.** A separate mean and variance for each coefficient (i.e., a diagonal Gaussian posterior).
 - **Full covariance.** Cholesky factor of a joint Gaussian, capturing the pairwise covariances among the coefficients.
 - **Mixture density.** A Gaussian mixture over the coefficients, which can also represent multimodality.
-- **Flow matching.** A conditional velocity field transporting a standard normal prior onto the . Integrate at
-inference time to draw samples. Allows unrestricted posterior forms at the cost of a closed-form density.
+- **Flow matching.** A conditional velocity field transporting a standard normal prior onto the posterior.
+Integrate at inference time to draw samples. Allows unrestricted posterior forms at the cost of a closed-form density.
 
 The same machinery can be used to train on either full z-stacks or on single-z images. For the former, the
 relative z-positions of the z-stack should be given. For the latter, a z-jitter parameter defines the span of
