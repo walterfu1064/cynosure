@@ -128,8 +128,8 @@ def get_default_amplitude_prior(
 
 def get_default_blob_prior(
         position_sigma: float = 1.0,
-        reference_diameter: float = 0.6,
-        log_diameter_sigma: float = 0.4,
+        reference_diameter: float = 0.3,
+        log_diameter_sigma: float = 0.3,
         amplitude_logit_sigma: float = 2.0,
 ) -> BlobPriorConfig:
     return BlobPriorConfig(

@@ -77,6 +77,16 @@ class ObjectDistribution(nn.Module, ABC):
         """
         return 0
 
+    @property
+    def param_labels(self) -> list[str]:
+        """Human-readable names for the sampled parameters, empty unless overriden by subclasses"""
+        return []
+
+    def param_stats(self) -> tuple[torch.Tensor, torch.Tensor]:
+        """Per-parameter means and stds of the sampled labels, empty unless overridden by subclasses"""
+        empty = torch.zeros(0, dtype=self.sim_cfg.ftype)
+        return empty, empty
+
     @abstractmethod
     def sample(
             self,
@@ -89,6 +99,19 @@ class ObjectDistribution(nn.Module, ABC):
         Identical across batch for static distributions, independently sampled for stochastic ones.
         """
         ...
+
+    def sample_with_params(
+            self,
+            batch_size: int = 1,
+            generator: Optional[torch.Generator] = None,
+    ) -> tuple[torch.Tensor, torch.Tensor]:
+        """
+        Draws a batch of objects along with the label-space parameters that generated them.
+        This base implementation covers distributions with no sampled parameters,
+        for which the parameter block is an empty [B, 0].
+        """
+        fields = self.sample(batch_size, generator)
+        return fields, fields.new_zeros(batch_size, 0)
 
     def forward(
             self,
@@ -396,6 +419,11 @@ class SampledKBlobs(SupergaussianBlobs):
         self.num_blobs = num_blobs
         self.prior_cfg = prior_cfg
 
+        # Empirically estimate the parameter statistics of the full KBlob object:
+        means, stds = self._monte_carlo_param_stats()
+        self.register_buffer("_param_means", means, persistent=False)
+        self.register_buffer("_param_stds", stds, persistent=False)
+
     @property
     def num_params(self) -> int:
         """{amplitude, row, column, diameter} = 4 dofs per blob, minus 1 for the pinned max amplitude"""
@@ -413,8 +441,27 @@ class SampledKBlobs(SupergaussianBlobs):
 
     @property
     def param_scales(self) -> torch.Tensor:
-        """Per-parameter prior RMS, for whitening the labels"""
+        """Per-parameter RMS of the underlying Gaussian draws, before canonicalization"""
         return self.prior_cfg.param_scales(self.num_blobs).to(self.coords)
+
+    @property
+    def min_diameter(self) -> float:
+        """Min diameter of one object pixel to avoid subpixel rasterization errors"""
+        return self.sim_cfg.object_pixel_size
+
+    def param_stats(self) -> tuple[torch.Tensor, torch.Tensor]:
+        """Per-parameter means and stds of the sampled labels, for whitening them as targets"""
+        return self._param_means, self._param_stds
+
+    def _monte_carlo_param_stats(self, num_draws: int = 1 << 17) -> tuple[torch.Tensor, torch.Tensor]:
+        """
+        Monte Carlo estimate of the empirical per-parameter statistics of `sample_params`
+        from the full, rendered KBlobs object. Statistically identical to the prior config
+        for K = 1, more useful for larger K.
+        """
+        generator = torch.Generator().manual_seed(0)  # always reproducible
+        draws = self.sample_params(num_draws, generator=generator)
+        return draws.mean(dim=0), draws.std(dim=0)
 
     def sample_params(
             self,
@@ -424,7 +471,8 @@ class SampledKBlobs(SupergaussianBlobs):
         """
         Draws a [B, 4K - 1] batch of blob params, ordered as [rows..., cols..., diams..., amps_sans_one...].
         Blobs are canonically sorted by descending amplitude logit.
-        Position offsets are clamped so the blob centers are always at least 1 pixel from the edge.
+        Position offsets are clamped so the blob centers are always at least 1 pixel from the edge,
+        and diameters are floored at `min_diameter`.
         """
         draws = torch.randn(
             batch_size, self.num_params,
@@ -432,8 +480,11 @@ class SampledKBlobs(SupergaussianBlobs):
         )
         K = self.num_blobs
         params = draws * self.param_scales
+        edge_margin = (self.size // 2 - 1) * self.sim_cfg.object_pixel_size
         positions = params[..., :2*K]
-        positions.clamp_(-(self.extent//2) + 1, self.extent//2 - 1)
+        positions.clamp_(-edge_margin, edge_margin)
+        log_diameters = params[..., 2*K:3*K]
+        log_diameters.clamp_(min=math.log(self.min_diameter / self.prior_cfg.reference_diameter))
         amp_logits, _ = torch.sort(params[..., 3*K:], dim=-1, descending=True)
         return torch.cat([params[..., :3*K], amp_logits], dim=-1)
 
@@ -448,9 +499,18 @@ class SampledKBlobs(SupergaussianBlobs):
         rows = params[..., :K]
         cols = params[..., K:2*K]
         diameters = self.prior_cfg.reference_diameter * torch.exp(params[..., 2*K:3*K])
+        diameters = diameters.clamp(min=self.min_diameter)  # `params` may be a decoder's prediction
         pinned = torch.ones_like(params[..., :1])  # the brightest blob's amplitude
         amplitudes = torch.cat([pinned, torch.sigmoid(params[..., 3*K:])], dim=-1)
         return rows, cols, diameters, amplitudes
+
+    def render_from_params(self, params: torch.Tensor) -> torch.Tensor:
+        """
+        Renders [..., 4K - 1] label-space parameters into [..., 1, H, W] objects,
+        e.g. for forwards-simulating a decoder's predicted parameters.
+        """
+        field = self._render(*self.params_to_blobs(params))
+        return field.unsqueeze(-3)
 
     def sample_with_params(
             self,
@@ -462,8 +522,7 @@ class SampledKBlobs(SupergaussianBlobs):
         Returns [B, 1, H, W] rendered objects and their [B, 4K - 1] label-space parameters.
         """
         params = self.sample_params(batch_size, generator)
-        field = self._render(*self.params_to_blobs(params))
-        return field.unsqueeze(1), params
+        return self.render_from_params(params), params
 
     def sample(
             self,

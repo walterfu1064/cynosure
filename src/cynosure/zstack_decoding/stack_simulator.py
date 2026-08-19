@@ -10,7 +10,7 @@ from typing import Optional
 import torch
 import torch.nn as nn
 
-from .coefficients import CoefficientSpace, build_aberration_space
+from .coefficients import CoefficientSpace, build_coefficient_space
 from .noise_model import NoiseModel
 from ..beam_propagation import BeamPropagator
 from ..config import NoiseConfig, OpticalConfig, PriorConfig, SimulationConfig, ZernikeConfig
@@ -77,8 +77,8 @@ class StackSimulator(nn.Module):
     ) -> 'StackSimulator':
         """Builds a forwards simulator (including its propagator and coefficient space) from configs"""
         propagator = BeamPropagator(sim_cfg, optics_cfg, phase_cfg, amp_cfg=amp_cfg)
-        coefficients, defocus_phase_coefs = build_aberration_space(
-            propagator, phase_prior_cfg, amp_prior_cfg, z_jitter
+        coefficients, defocus_phase_coefs = build_coefficient_space(
+            propagator, phase_prior_cfg, amp_prior_cfg, z_jitter, object_distribution=object_distribution
         )
         return cls(
             propagator=propagator,
@@ -119,6 +119,8 @@ class StackSimulator(nn.Module):
             z: torch.Tensor,
             phase_coefs: torch.Tensor,
             amp_coefs: torch.Tensor,
+            objects: Optional[torch.Tensor] = None,
+            generator: Optional[torch.Generator] = None,
     ) -> torch.Tensor:
         """
         Forwards-simulates a z-stack (or a batch of such) from the given defocus values and aberrations.
@@ -135,6 +137,8 @@ class StackSimulator(nn.Module):
         - z: defocus values from `defocus_from_objective_z`, either [B,] or [B, Z]
         - phase_coefs: phase coefficients, [B, N_phase]
         - amp_coefs: amplitude coefficients, [B, N_amp]
+        - objects: optional pre-drawn [B, 1, H, W] objects; freshly sampled per chunk when omitted
+        - generator: for internal object draws, unused for non-stochastic objects
         """
         if z.ndim == 1 and self.num_z == 1:
             z = z.unsqueeze(-1)  # [B,] -> [B, 1]
@@ -145,6 +149,8 @@ class StackSimulator(nn.Module):
                 "Got different batch dims for `z`, `phase_coefs`, and `amp_coefs`: "
                 f"{z.shape[0]}, {phase_coefs.shape[0]}, {amp_coefs.shape[0]}"
             )
+        if objects is not None and objects.shape[0] != z.shape[0]:
+            raise ValueError(f"Batch dims differ for `objects` and `z`: {objects.shape[0]}, {z.shape[0]}")
 
         batch_size = z.shape[0]
         chunk_size = self.chunk_size or batch_size
@@ -156,7 +162,10 @@ class StackSimulator(nn.Module):
             amp_chunk = amp_coefs[start:stop].repeat_interleave(self.num_z, dim=0)
             psf = self.propagator(z_chunk, phase_chunk, amp_chunk)
             psf = psf.reshape(stop - start, self.num_z, *psf.shape[-2:])  # unfold to [B, Z, H, W]
-            img = self.object_distribution(psf, batch_size=stop - start)
+            if objects is None:
+                img = self.object_distribution(psf, batch_size=stop - start, generator=generator)
+            else:
+                img = self.object_distribution.convolve_psf(psf, objects[start:stop])
             image_chunks.append(img)
         return torch.cat(image_chunks)
 
@@ -220,6 +229,7 @@ class StackSimulator(nn.Module):
             amp_coefs: torch.Tensor,
             with_noise: bool = False,
             offsets: Optional[torch.Tensor] = None,
+            objects: Optional[torch.Tensor] = None,
             generator: Optional[torch.Generator] = None,
     ) -> torch.Tensor:
         """
@@ -227,12 +237,13 @@ class StackSimulator(nn.Module):
         from physical [B, N] coefficients (e.g. as returned by `predict_coefficients`).
         If `with_noise`, adds noise before normalizing.
         If `offsets` is given, rigidly shifts each z-stack, preserving the relative z-spacing.
+        If `objects` is given, images those [B, 1, H, W] objects instead of fresh draws.
 
         Returns [B, num_z, H, W].
         """
         with torch.no_grad():
             z = self.batched_defocus(phase_coefs.shape[0], offsets=offsets)
-            images = self.simulate_stacks(z, phase_coefs, amp_coefs)
+            images = self.simulate_stacks(z, phase_coefs, amp_coefs, objects=objects, generator=generator)
             if with_noise:
                 images = self.apply_noise(images, generator)
             return self.normalize_stack(images).float()
@@ -241,23 +252,28 @@ class StackSimulator(nn.Module):
             self,
             batch_size: int,
             generator: Optional[torch.Generator] = None,
-    ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
+    ) -> tuple[torch.Tensor, ...]:
         """
-        Samples a set of aberrations, forwards-simulates the z-stacks, corrupts
-        them with the noise model, and normalizes them for use as inputs to the CNN.
+        Samples a set of aberrations (and an object per stack, for stochastic object
+        distributions), forwards-simulates the z-stacks, corrupts them with the noise
+        model, and normalizes them for use as inputs to the CNN.
 
         If `z_jitter` is set, calculates the synthetic z-stacks under random rigid offsets,
         and adds the defocus-equivalent phase shifts to the synthetic labels.
 
-        Returns:
+        Returns `images` followed by one label tensor per block of the coefficient space:
         - images: [B, num_z, H, W] normalized z-stacks
         - phase_coefs: [B, num_phase_coefs] effective phase aberration coefficients (including jitter offsets)
         - amp_coefs: [B, num_amp_coefs] amp aberration coefficients
+        - object_params: [B, num_params] object labels if reported by the object distribution
         """
         phase_coefs, amp_coefs = self.sample_coefficients(batch_size, generator=generator)
         offsets = self.sample_z_jitter(batch_size, generator=generator)
+        objects, object_params = self.object_distribution.sample_with_params(batch_size, generator)
         images = self.simulate_normalized_stacks(
-            phase_coefs, amp_coefs, with_noise=True, offsets=offsets, generator=generator
+            phase_coefs, amp_coefs, with_noise=True, offsets=offsets, objects=objects, generator=generator
         )
         phase_coefs = phase_coefs + self.z_offset_to_coefficients(offsets)
+        if self.object_distribution.num_params:
+            return images, phase_coefs, amp_coefs, object_params
         return images, phase_coefs, amp_coefs

@@ -1,6 +1,7 @@
 """
 PyTorch Lightning model that trains itself to infer phase and amplitude
-aberrations from z-stacks.
+aberrations from z-stacks (along with the object's generative parameters, when the
+object distribution is itself stochastic).
 
 Training data is synthesized on the fly by a StackSimulator, using Zernike coefficients
 sampled from a decaying-spectrum prior and propagated forwards to get the synthetic images.
@@ -269,8 +270,8 @@ class ZstackSolver(pl.LightningModule):
         Shared step for training.
         Generates synthetic training pairs, runs inference from the images, and calculates losses.
         """
-        images, phase_coefs, amp_coefs = self.simulator.create_examples(self.train_cfg.batch_size, generator=generator)
-        targets = self.coefficients.whiten_blocks(phase_coefs, amp_coefs)
+        images, *label_blocks = self.simulator.create_examples(self.train_cfg.batch_size, generator=generator)
+        targets = self.coefficients.whiten_blocks(*label_blocks)
         predictions = self.forward(images)
         loss, logs = self.compute_losses(predictions, targets, generator=generator)
         return loss, predictions, targets, logs
@@ -337,18 +338,16 @@ class ZstackSolver_MixedDensity(ZstackSolver):
     def predict_component_coefficients(
             self,
             images: torch.Tensor,
-    ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
+    ) -> tuple[torch.Tensor, ...]:
         """
         Predicts the physical-space coefficients of each mixture component.
 
         Returns:
         - weights: [B, K] mixture weights
-        - phase_coefs: [B, K, num_phase_coefs]
-        - amp_coefs: [B, K, num_amp_coefs]
+        - one [B, K, N_b] coefficient tensor per CoefficientBlock
         """
         means, logits, _ = self.head.split_predictions(self.forward(images))
-        phase_coefs, amp_coefs = self.coefficients.unwhiten_to_blocks(means)
-        return logits.softmax(dim=1), phase_coefs, amp_coefs
+        return logits.softmax(dim=1), *self.coefficients.unwhiten_to_blocks(means)
 
 
 class ZstackSolver_FlowMatching(ZstackSolver):

@@ -1,6 +1,7 @@
 """
-Classes for managing aberration coefficients.
+Classes for managing the regression coefficients.
 
+Covers aberrations, as well as the object distribution's labels for stochastic objects.
 Includes handling the layout, bookkeeping, scaling, and whitening.
 
 Note the two scales: `prior_scales` as the RMS that the coefs originally sample from, `target_scales`
@@ -14,6 +15,7 @@ import torch
 import torch.nn as nn
 
 from ..config import PriorConfig
+from ..object_distribution import ObjectDistribution
 from ..zernike import ZernikeProjector
 
 
@@ -26,6 +28,8 @@ class CoefficientBlock:
     pinned_mask: torch.Tensor  # [N,] bool mask of which coefficients are pinned at constants
     pinned_value: float  # value of pinned coefficients
     jitter_coupling: Optional[torch.Tensor] = None  # [N,] projection of in-medium defocus, if relevant
+    target_means: Optional[torch.Tensor] = None  # [N,] empirical label means, derived from the pinning if absent
+    is_externally_sampled: bool = False  # sampling owned by another component, so `sample` skips this block
 
     @property
     def size(self) -> int:
@@ -58,6 +62,26 @@ def zernike_block(
     )
 
 
+def object_label_block(
+        object_distribution: ObjectDistribution,
+        ftype: torch.dtype = torch.float32,
+) -> CoefficientBlock:
+    """
+    Builds a CoefficientBlock for an object distribution's sampled parameters.
+    Marked as externally sampled, since the ObjectDistribution itself does the sampling.
+    """
+    means, stds = object_distribution.param_stats()
+    return CoefficientBlock(
+        name="object",
+        labels=tuple(object_distribution.param_labels),
+        prior_scales=stds.to(ftype),
+        pinned_mask=torch.zeros(object_distribution.num_params, dtype=torch.bool),
+        pinned_value=0.0,
+        target_means=means.to(ftype),
+        is_externally_sampled=True,
+    )
+
+
 def fit_defocus_to_phase_basis(propagator, is_phase_pinned: torch.Tensor) -> torch.Tensor:
     """
     Pre-calculates the projection of the defocus operator onto the phase Zernike
@@ -77,13 +101,17 @@ def fit_defocus_to_phase_basis(propagator, is_phase_pinned: torch.Tensor) -> tor
     return torch.where(is_phase_pinned, 0.0, coefs).to(propagator.ftype)
 
 
-def build_aberration_space(
+def build_coefficient_space(
         propagator,
         phase_prior_cfg: PriorConfig,
         amp_prior_cfg: PriorConfig,
         z_jitter: float = 0.0,
+        object_distribution: Optional[ObjectDistribution] = None,
 ) -> tuple['CoefficientSpace', torch.Tensor]:
-    """Builds the phase+amplitude coefficient space and with the defocus decomposition for z-jittering"""
+    """
+    Builds the coefficient space and the defocus decomposition for z-jittering.
+    Always includes phase and amplitude blocks, may also include an object block.
+    """
     is_phase_pinned = (propagator.phase_projector.nm_indices == 0).all(dim=1)
     defocus_phase_coefs = fit_defocus_to_phase_basis(propagator, is_phase_pinned)
 
@@ -100,8 +128,12 @@ def build_aberration_space(
         pinned_value=1,  # pin overall intensity
         ftype=propagator.ftype,
     )
+    blocks = [phase_block, amp_block]
+    if object_distribution is not None and object_distribution.num_params > 0:
+        blocks.append(object_label_block(object_distribution, ftype=propagator.ftype))
+
     space = CoefficientSpace(
-        [phase_block, amp_block],
+        blocks,
         jitter_std=propagator.defocus_from_objective_z(z_jitter),
         ftype=propagator.ftype,
     )
@@ -109,7 +141,7 @@ def build_aberration_space(
 
 
 class CoefficientSpace(nn.Module):
-    """Handles all bookkeeping, whitening, priors, etc. for the aberration coefficients"""
+    """Handles all bookkeeping, whitening, priors, etc. for the regression coefficients"""
 
     def __init__(
             self,
@@ -164,7 +196,10 @@ class CoefficientSpace(nn.Module):
         for block in self.blocks:
             scales = block.prior_scales.to(self.ftype)
             prior_scales.append(scales)
-            target_means.append(block.pinned_mask.to(self.ftype) * block.pinned_value)
+            if block.target_means is not None:
+                target_means.append(block.target_means.to(self.ftype))
+            else:
+                target_means.append(block.pinned_mask.to(self.ftype) * block.pinned_value)
 
             if block.jitter_coupling is not None and self.jitter_std > 0:
                 widened = torch.sqrt(scales**2 + jitter_variance * block.jitter_coupling**2)
@@ -201,6 +236,14 @@ class CoefficientSpace(nn.Module):
     def block_size(self, name: str) -> int:
         """Number of coefficients in a named block"""
         return self.blocks[self._block_index(name)].size
+
+    def has_block(self, name: str) -> bool:
+        """Whether a block of the given name exists in this space"""
+        return any(block.name == name for block in self.blocks)
+
+    def block_coefs(self, coefs: torch.Tensor, name: str) -> torch.Tensor:
+        """Selects a named block's [..., N_b] slice from full-width [..., N_tot] coefficients"""
+        return self.split(coefs)[self._block_index(name)]
 
     def num_nonpinned_in(self, name: str) -> int:
         """Number of non-pinned coefficients in a named block"""
@@ -260,9 +303,14 @@ class CoefficientSpace(nn.Module):
             device: Optional[torch.device] = None,
             generator: Optional[torch.Generator] = None,
     ) -> tuple[torch.Tensor, ...]:
-        """Samples per-block [B, N_b] coefficients from the priors, holding the pinned ones fixed"""
+        """
+        Samples per-block [B, N_b] coefficients from the priors, holding the pinned ones fixed.
+        Externally-sampled blocks are skipped.
+        """
         samples = []
         for block, scales, pinned in zip(self.blocks, self.split(self.prior_scales), self.split(self.is_pinned)):
+            if block.is_externally_sampled:
+                continue
             coefs = torch.randn(batch_size, block.size, generator=generator, dtype=self.ftype, device=device)
             coefs = coefs * scales.to(device)
             samples.append(torch.where(pinned.to(device), block.pinned_value, coefs))

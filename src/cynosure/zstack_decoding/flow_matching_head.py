@@ -209,9 +209,12 @@ class FlowMatchingHead(PosteriorHead):
         samples = self.whitened_samples(encoded, self.num_val_samples)  # [B, num_samples, N_kept]
         targets_kept = self.coefficients.gather_nonpinned(targets).unsqueeze(1)  # [B, 1, N_kept]
 
-        _, amp = self.coefficients.split(self.coefficients.scatter_nonpinned(samples.mean(dim=1)))
-        _, amp_targets = self.coefficients.split(targets)
-        metrics = {"amp_rmse_whitened": F.mse_loss(amp, amp_targets).sqrt()}
+        metrics = {}
+        sample_means = self.coefficients.scatter_nonpinned(samples.mean(dim=1))
+        if self.coefficients.has_block("object"):
+            obj = self.coefficients.block_coefs(sample_means, "object")
+            obj_targets = self.coefficients.block_coefs(targets, "object")
+            metrics["object_rmse_whitened"] = F.mse_loss(obj, obj_targets).sqrt()
 
         sample_mse = (samples - targets_kept).square().mean(dim=2)  # [B, num_samples]
         metrics["best_sample_rmse"] = sample_mse.amin(dim=1).mean().sqrt()  # cf. best_component_rmse
