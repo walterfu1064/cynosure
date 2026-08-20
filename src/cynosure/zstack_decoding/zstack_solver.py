@@ -17,6 +17,10 @@ types of PosteriorHeads.
 Aberration coefficients are whitened/unwhitened before/after use as regression targets,
 to keep them on an easy scale for the model to learn.
 
+With `twin_augmentation` enabled, each training batch is doubled by relabeling the
+same images with their focal-plane twins (see `_twin_parity_signs`), to help the head
+learn that degeneracy. Only meaningful for heads that can represent multimodal posteriors.
+
 Validation batches are generated in the same way as training ones, but with a fixed seed
 so they're consistent across epochs.
 """
@@ -59,6 +63,16 @@ from ..object_distribution import ObjectDistribution
 from ..utilities.ode_solvers import ODESolver
 
 
+def _twin_parity_signs(nm_indices: torch.Tensor, negate_even_n: bool) -> torch.Tensor:
+    """
+    Returns the [N,] signs (+/-1) that Zernike coefficients pick up under negating z,
+    the even-n phase Zernikes (`negate_even_n = True`), and the odd-n amplitude Zernikes
+    (`negate_even_n = False`).
+    """
+    is_even_n = nm_indices[:, 0] % 2 == 0
+    return torch.where(is_even_n == negate_even_n, -1.0, 1.0)
+
+
 class ZstackSolver(pl.LightningModule):
     """
     Base for the solver family.
@@ -97,6 +111,7 @@ class ZstackSolver(pl.LightningModule):
             noise_cfg: Optional[NoiseConfig] = None,
             hidden_channels: Sequence[int] = (16, 32),
             embedding_dims: int = 128,
+            twin_augmentation: bool = False,
             head_factory: HeadFactory,
     ):
         super().__init__()
@@ -125,6 +140,22 @@ class ZstackSolver(pl.LightningModule):
             chunk_size=train_cfg.generator_chunk,
         )
         self.ftype = self.simulator.ftype
+
+        if twin_augmentation and (self.simulator.num_z != 1 or self.simulator.z_objective.count_nonzero()):
+            raise ValueError("twin_augmentation requires a single image plane at z_objective = 0")
+        self.twin_augmentation = twin_augmentation
+        if twin_augmentation:
+            propagator = self.simulator.propagator
+            self.register_buffer(
+                "twin_phase_signs",
+                _twin_parity_signs(propagator.phase_projector.nm_indices, negate_even_n=True).to(self.ftype),
+                persistent=False,
+            )
+            self.register_buffer(
+                "twin_amp_signs",
+                _twin_parity_signs(propagator.amp_projector.nm_indices, negate_even_n=False).to(self.ftype),
+                persistent=False,
+            )
 
         encoder = EncoderSpec(
             in_channels=self.simulator.num_z,
@@ -273,10 +304,21 @@ class ZstackSolver(pl.LightningModule):
         """
         Shared step for training.
         Generates synthetic training pairs, runs inference from the images, and calculates losses.
+
+        If `twin_augmentation` is enabled, training batches (but not validation ones)
+        are doubled with the same images relabeled by their conjugate twins.
         """
-        images, *label_blocks = self.simulator.create_examples(self.train_cfg.batch_size, generator=generator)
-        targets = self.coefficients.whiten_blocks(*label_blocks)
+        images, phase_coefs, amp_coefs, *other_blocks = self.simulator.create_examples(
+            self.train_cfg.batch_size, generator=generator,
+        )
+        targets = self.coefficients.whiten_blocks(phase_coefs, amp_coefs, *other_blocks)
         predictions = self.forward(images)
+        if self.twin_augmentation and self.training:
+            twin_targets = self.coefficients.whiten_blocks(
+                phase_coefs * self.twin_phase_signs, amp_coefs * self.twin_amp_signs, *other_blocks,
+            )
+            predictions = torch.cat([predictions, predictions], dim=0)
+            targets = torch.cat([targets, twin_targets], dim=0)
         loss, logs = self.compute_losses(predictions, targets, generator=generator)
         return loss, predictions, targets, logs
 
