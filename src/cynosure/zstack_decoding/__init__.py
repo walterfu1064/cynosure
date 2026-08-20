@@ -1,3 +1,4 @@
+from .jitter_modes import JitterMode, NoJitter, ShellJitter, UniformJitter
 from .noise_model import NoiseModel
 from .submodules import CnnEncoder, CnnDecoder, CnnDecoder_DetachedHead, VelocityField
 from .zstack_solver import (

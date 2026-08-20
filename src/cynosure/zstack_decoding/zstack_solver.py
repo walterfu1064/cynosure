@@ -32,6 +32,7 @@ from torch.utils.data import DataLoader, TensorDataset
 
 from .coefficients import CoefficientSpace
 from .flow_matching_head import FlowMatchingHead
+from .jitter_modes import JitterMode, NoJitter
 from .noise_model import NoiseModel
 from .posterior_heads import (
     CovarianceHead,
@@ -92,7 +93,7 @@ class ZstackSolver(pl.LightningModule):
             amp_prior_cfg: PriorConfig,
             object_distribution: ObjectDistribution,
             z_objective: Optional[torch.Tensor] = None,
-            z_jitter: float = 0.0,
+            z_jitter: float | JitterMode = NoJitter(),
             noise_cfg: Optional[NoiseConfig] = None,
             hidden_channels: Sequence[int] = (16, 32),
             embedding_dims: int = 128,
@@ -124,7 +125,6 @@ class ZstackSolver(pl.LightningModule):
             chunk_size=train_cfg.generator_chunk,
         )
         self.ftype = self.simulator.ftype
-        self.z_jitter = z_jitter
 
         encoder = EncoderSpec(
             in_channels=self.simulator.num_z,
@@ -155,6 +155,10 @@ class ZstackSolver(pl.LightningModule):
     @property
     def num_z(self) -> int:
         return self.simulator.num_z
+
+    @property
+    def z_jitter(self) -> JitterMode:
+        return self.simulator.z_jitter
 
     @property
     def z_objective(self) -> torch.Tensor:

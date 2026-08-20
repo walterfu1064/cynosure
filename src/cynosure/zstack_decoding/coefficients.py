@@ -14,6 +14,7 @@ from typing import Optional, Sequence
 import torch
 import torch.nn as nn
 
+from .jitter_modes import JitterMode, NoJitter
 from ..config import PriorConfig
 from ..object_distribution import ObjectDistribution
 from ..zernike import ZernikeProjector
@@ -105,7 +106,7 @@ def build_coefficient_space(
         propagator,
         phase_prior_cfg: PriorConfig,
         amp_prior_cfg: PriorConfig,
-        z_jitter: float = 0.0,
+        jitter: JitterMode = NoJitter(),
         object_distribution: Optional[ObjectDistribution] = None,
 ) -> tuple['CoefficientSpace', torch.Tensor]:
     """
@@ -134,7 +135,7 @@ def build_coefficient_space(
 
     space = CoefficientSpace(
         blocks,
-        jitter_std=propagator.defocus_from_objective_z(z_jitter),
+        jitter_variance=jitter.variance * propagator.axial_scale ** 2,  # objective units -> in-medium defocus
         ftype=propagator.ftype,
     )
     return space, defocus_phase_coefs
@@ -147,13 +148,13 @@ class CoefficientSpace(nn.Module):
             self,
             blocks: Sequence[CoefficientBlock],
             *,
-            jitter_std: float = 0.0,
+            jitter_variance: float = 0.0,
             ftype: torch.dtype = torch.float32,
     ):
         """
         Arguments:
         - blocks: ordered blocks to be catted into the ceofficient vector
-        - jitter_std: z-jitter rms in in-medium defocus units, widens the whitening scales of defocus-coupled blocks
+        - jitter_variance: z-jitter variance in in-medium defocus units, widens the whitening of defocus-coupled blocks
         - ftype: float dtype
         """
         super().__init__()
@@ -162,7 +163,7 @@ class CoefficientSpace(nn.Module):
 
         self.blocks = tuple(blocks)
         self.ftype = ftype
-        self.jitter_std = jitter_std
+        self.jitter_variance = jitter_variance
 
         self._register_layout()
         self._register_statistics()
@@ -191,8 +192,6 @@ class CoefficientSpace(nn.Module):
         Coefs coupled to defocus have their scales widened to account for z-jitter, if present.
         """
         prior_scales, target_means, target_scales = [], [], []
-        jitter_variance = self.jitter_std ** 2 / 3  # variance of a uniform over +/- jitter_std
-
         for block in self.blocks:
             scales = block.prior_scales.to(self.ftype)
             prior_scales.append(scales)
@@ -201,8 +200,8 @@ class CoefficientSpace(nn.Module):
             else:
                 target_means.append(block.pinned_mask.to(self.ftype) * block.pinned_value)
 
-            if block.jitter_coupling is not None and self.jitter_std > 0:
-                widened = torch.sqrt(scales**2 + jitter_variance * block.jitter_coupling**2)
+            if block.jitter_coupling is not None and self.jitter_variance > 0:
+                widened = torch.sqrt(scales**2 + self.jitter_variance * block.jitter_coupling**2)
                 target_scales.append(widened)
             else:
                 target_scales.append(scales)

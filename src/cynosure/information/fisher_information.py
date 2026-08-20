@@ -62,7 +62,8 @@ def simulate_image_as_photon_counts(
     full_coefs = coefficients.target_means + coefficients.nonpinned_basis @ coefs
 
     defocus = simulator.propagator.defocus_from_objective_z(z)
-    phase_coefs, amp_coefs = coefficients.split(full_coefs)
+    phase_coefs = coefficients.block_coefs(full_coefs, "phase")
+    amp_coefs = coefficients.block_coefs(full_coefs, "amp")
     phase_coefs = phase_coefs.unsqueeze(0).expand(num_z, -1)
     amp_coefs = amp_coefs.unsqueeze(0).expand(num_z, -1)
     psf = simulator.propagator(defocus, phase_coefs, amp_coefs)  # [Z, H, W]
@@ -180,15 +181,12 @@ def defocus_direction(simulator: StackSimulator) -> torch.Tensor:
     device = simulator.device
     one = torch.tensor(1, dtype=dtype, device=device)  # less than 2, but a whole lot more than 0
     phase_direction = simulator.propagator.defocus_from_objective_z(one) * simulator.defocus_phase_coefs
-    amp_direction = torch.zeros(  # just to pad the join-gather
-        coefficients.block_size("amp"), dtype=dtype, device=device
-    )
-    return coefficients.gather_nonpinned(coefficients.join(phase_direction, amp_direction))
-
-
-def _uniform_z_jitter_variance(simulator: StackSimulator) -> float:
-    """Variance of the z-jitter, which is uniform over [-z_jitter, +z_jitter]"""
-    return simulator.z_jitter ** 2 / 3
+    blocks = [  # every other block is zero, but still has to be padded out for the join-gather
+        phase_direction if block.name == "phase"
+        else torch.zeros(block.size, dtype=dtype, device=device)
+        for block in coefficients.blocks
+    ]
+    return coefficients.gather_nonpinned(coefficients.join(*blocks))
 
 
 def coefficient_prior_covariance(simulator: StackSimulator, include_jitter: bool = True) -> np.ndarray:
@@ -203,9 +201,9 @@ def coefficient_prior_covariance(simulator: StackSimulator, include_jitter: bool
     sigmas = coefficients.gather_nonpinned(coefficients.prior_scales).numpy(force=True)  # not jitter-widened yet
     covariance = np.diag(sigmas ** 2)
 
-    if include_jitter and simulator.z_jitter > 0:
+    if include_jitter and simulator.z_jitter.variance > 0:
         direction = defocus_direction(simulator).numpy(force=True)
-        covariance = covariance + _uniform_z_jitter_variance(simulator) * np.outer(direction, direction)
+        covariance = covariance + simulator.z_jitter.variance * np.outer(direction, direction)
 
     return covariance
 
@@ -215,13 +213,13 @@ def augmented_prior_covariance(simulator: StackSimulator) -> np.ndarray:
     Extends the output of `coefficient_prior_covariance`, adding z along the last row+column.
     Returns as a [C_kept+1, C_kept+1] covariance matrix matching `calculate_augmented_fisher_matrix()`.
     """
-    if simulator.z_jitter <= 0:
-        raise ValueError("z_jitter = 0, so z is exactly known, use `coefficient_prior_covariance`")
+    if simulator.z_jitter.variance <= 0:
+        raise ValueError("no z-jitter, so z is exactly known, use `coefficient_prior_covariance`")
 
     num_coefs = simulator.coefficients.num_nonpinned_coefs
     covariance = np.zeros((num_coefs + 1, num_coefs + 1))
     covariance[:num_coefs, :num_coefs] = coefficient_prior_covariance(simulator, include_jitter=False)
-    covariance[num_coefs, num_coefs] = _uniform_z_jitter_variance(simulator)
+    covariance[num_coefs, num_coefs] = simulator.z_jitter.variance
     return covariance
 
 

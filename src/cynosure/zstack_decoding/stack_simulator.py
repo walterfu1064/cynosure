@@ -11,6 +11,7 @@ import torch
 import torch.nn as nn
 
 from .coefficients import CoefficientSpace, build_coefficient_space
+from .jitter_modes import JitterMode, NoJitter, as_jitter_mode
 from .noise_model import NoiseModel
 from ..beam_propagation import BeamPropagator
 from ..config import NoiseConfig, OpticalConfig, PriorConfig, SimulationConfig, ZernikeConfig
@@ -28,18 +29,22 @@ class StackSimulator(nn.Module):
             coefficients: CoefficientSpace,
             defocus_phase_coefs: torch.Tensor,
             z_objective: Optional[torch.Tensor] = None,
-            z_jitter: float = 0.0,
+            z_jitter: float | JitterMode = NoJitter(),
             noise_cfg: Optional[NoiseConfig] = None,
             chunk_size: Optional[int] = None,
     ):
         """
+        Since the BeamPropagator and CoefficientSpace are fully defined by the configs and
+        must be kept in sync with them, StackSimulator should usually be instantiated via
+        `from_configs`, not from this method.
+
         Arguments:
         - propagator: beam propagation simulator
         - object_distribution: object being imaged, to be convolved with the PSF
         - coefficients: layout and priors for the aberration coefficients
         - defocus_phase_coefs: [num_phase,] projection of in-medium defocus, from `fit_defocus_to_phase_basis`
-        - z_objective: physical objective positions the stack is taken at
-        - z_jitter: half-width of the uniform rigid z-offset applied to each synthetic stack
+        - z_objective: physical objective positions the stack is taken at (defaults to one-sided jitter)
+        - z_jitter: distribution of the rigid z-offset applied to each synthetic stack
         - noise_cfg: if given, NoiseModel args, used to apply noise before normalization
         - chunk_size: stacks per propagation chunk, to bound peak memory
         """
@@ -51,13 +56,13 @@ class StackSimulator(nn.Module):
         self.noise_cfg = noise_cfg
         self.ftype = propagator.ftype
         self.chunk_size = chunk_size
+        self.z_jitter = as_jitter_mode(z_jitter)
 
-        if z_objective is None:
-            z_objective = torch.full((1,), fill_value=z_jitter, dtype=self.ftype)
+        if z_objective is None:  # place the single plane so the jitter only ever reaches one side of focus
+            z_objective = torch.full((1,), fill_value=self.z_jitter.max_offset, dtype=self.ftype)
         self.register_buffer("z_objective", z_objective.to(self.ftype))
         self.register_buffer("defocus_phase_coefs", defocus_phase_coefs)
         self.num_z: int = int(z_objective.shape[0])
-        self.z_jitter = float(z_jitter)  # plain float: consumers do ordinary arithmetic on it
 
     @classmethod
     def from_configs(
@@ -71,14 +76,15 @@ class StackSimulator(nn.Module):
             amp_prior_cfg: PriorConfig,
             object_distribution: ObjectDistribution,
             z_objective: Optional[torch.Tensor] = None,
-            z_jitter: float = 0.0,
+            z_jitter: float | JitterMode = NoJitter(),
             noise_cfg: Optional[NoiseConfig] = None,
             chunk_size: Optional[int] = None,
     ) -> 'StackSimulator':
         """Builds a forwards simulator (including its propagator and coefficient space) from configs"""
+        jitter = as_jitter_mode(z_jitter)  # shared, so the whitening always matches what gets sampled
         propagator = BeamPropagator(sim_cfg, optics_cfg, phase_cfg, amp_cfg=amp_cfg)
         coefficients, defocus_phase_coefs = build_coefficient_space(
-            propagator, phase_prior_cfg, amp_prior_cfg, z_jitter, object_distribution=object_distribution
+            propagator, phase_prior_cfg, amp_prior_cfg, jitter, object_distribution=object_distribution,
         )
         return cls(
             propagator=propagator,
@@ -86,7 +92,7 @@ class StackSimulator(nn.Module):
             coefficients=coefficients,
             defocus_phase_coefs=defocus_phase_coefs,
             z_objective=z_objective,
-            z_jitter=z_jitter,
+            z_jitter=jitter,
             noise_cfg=noise_cfg,
             chunk_size=chunk_size,
         )
@@ -174,14 +180,8 @@ class StackSimulator(nn.Module):
             batch_size: int,
             generator: Optional[torch.Generator] = None,
     ) -> torch.Tensor:
-        """
-        Samples [B,] objective-z defocus offsets uniformly over [-z_jitter, z_jitter].
-        If `z_jitter` is 0, returns zeros.
-        """
-        if self.z_jitter == 0:
-            return torch.zeros(batch_size, dtype=self.ftype, device=self.device)
-        uniform = torch.rand(batch_size, generator=generator, dtype=self.ftype, device=self.device)
-        return (uniform * 2 - 1) * self.z_jitter
+        """Samples [B,] rigid objective-z offsets from the jitter mode"""
+        return self.z_jitter.sample(batch_size, device=self.device, dtype=self.ftype, generator=generator)
 
     def z_offset_to_coefficients(self, z_offsets: torch.Tensor) -> torch.Tensor:
         """
