@@ -4,6 +4,7 @@ In the z-stack case, jitter is rigid across slices.
 All numbers are in physical objective units.
 """
 
+import math
 from abc import ABC, abstractmethod
 from dataclasses import dataclass
 from typing import Optional
@@ -121,6 +122,49 @@ class ShellJitter(JitterMode):
     def variance(self) -> float:
         low, high = self.min_jitter, self.max_jitter
         return (low ** 2 + low * high + high ** 2) / 3
+
+    @property
+    def max_offset(self) -> float:
+        return self.max_jitter
+
+
+@dataclass(frozen=True, slots=True)
+class SoftShellJitter(JitterMode):
+    """
+    Tapered version of ShellJitter, using a Kumaraswamy distribution to suppress near-focus
+    images without removing them entirely. Mirrored across z=0 as with ShellJitter, with
+    the lobes spanning [-max_jitter, 0] U [0, max_jitter].
+
+    Beta would've been more aesthetically pleasing, but torch's Beta distribution doesn't
+    take a `generator` argument, which would have made validation non-reproducible. Alas.
+    """
+    max_jitter: float
+    alpha: float = 3.0
+    beta: float = 1.5
+
+    def __post_init__(self):
+        if self.max_jitter < 0:
+            raise ValueError(f"max_jitter must be non-negative, got {self.max_jitter}")
+        if self.alpha <= 0 or self.beta <= 0:
+            raise ValueError(f"alpha and beta must be positive, got {self.alpha} and {self.beta}")
+
+    def sample(
+            self,
+            num_samples: int,
+            *,
+            device: Optional[torch.device] = None,
+            dtype: torch.dtype = torch.float32,
+            generator: Optional[torch.Generator] = None,
+    ) -> torch.Tensor:
+        signed = torch.rand(num_samples, generator=generator, dtype=dtype, device=device) * 2 - 1
+        magnitude = (1 - signed.abs() ** (1 / self.beta)) ** (1 / self.alpha)  # inverse of CDF = 1 - (1 - x^a)^b
+        return torch.copysign(magnitude * self.max_jitter, signed)
+
+    @property
+    def variance(self) -> float:
+        order = 1 + 2 / self.alpha
+        log_beta_fn = math.lgamma(order) + math.lgamma(self.beta) - math.lgamma(order + self.beta)
+        return self.max_jitter ** 2 * self.beta * math.exp(log_beta_fn)
 
     @property
     def max_offset(self) -> float:
