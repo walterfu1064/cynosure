@@ -176,3 +176,7 @@ def as_jitter_mode(jitter: float | JitterMode) -> JitterMode:
     if isinstance(jitter, JitterMode):
         return jitter
     return UniformJitter(float(jitter)) if jitter > 0 else NoJitter()
+
+
+# These dataclasses are frozen and hold numbers, mark them save to serialize so `torch.load` doesn't complain
+torch.serialization.add_safe_globals([NoJitter, UniformJitter, ShellJitter, SoftShellJitter])
