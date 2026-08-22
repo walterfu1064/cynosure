@@ -18,6 +18,15 @@ The project is managed with [uv](https://docs.astral.sh/uv/), so `uv sync` will 
 Slowly.
 
 
+### Overview
+
+This repository is best understood less as a library than as a series of worked examples. The central theme
+is how machine learning can be applied to microscopy images to answer questions about the optical system
+and the object being imaged. The examples are self-contained, but generally build on one another, mirroring
+the development of the repository. Reading through them in order is likely the best way to understand
+this project.
+
+
 ### Forward model
 
 The core is a fully differentiable beam propagation module that takes a wavefront at a microscope
