@@ -488,7 +488,7 @@ class SampledKBlobs(SupergaussianBlobs):
         amp_logits, _ = torch.sort(params[..., 3*K:], dim=-1, descending=True)
         return torch.cat([params[..., :3*K], amp_logits], dim=-1)
 
-    def params_to_blobs(
+    def params_to_interpreted(
             self,
             params: torch.Tensor,
     ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
@@ -509,7 +509,7 @@ class SampledKBlobs(SupergaussianBlobs):
         Renders [..., 4K - 1] label-space parameters into [..., 1, H, W] objects,
         e.g. for forwards-simulating a decoder's predicted parameters.
         """
-        field = self._render(*self.params_to_blobs(params))
+        field = self._render(*self.params_to_interpreted(params))
         return field.unsqueeze(-3)
 
     def sample_with_params(
