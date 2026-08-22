@@ -12,19 +12,22 @@ Two routes are provided: classical phase retrieval by gradient descent on a sing
 amortized simulation-based inference approaches, where a CNN-based decoder trained on synthetic data infers
 the full posterior distribution over the aberrations without any per-image optimization.
 
-The project is managed with [uv](https://docs.astral.sh/uv/), so `uv sync` will set up the environment,
-`uv run pytest` will run the test suite, and `uv run jupyter lab` will open the worked examples in
-[`examples/`](examples/README.md). CUDA is used when available. Otherwise, everything also runs on CPU.
-Slowly.
 
-
-### Overview
+### Foreword
 
 This repository is best understood less as a library than as a series of worked examples. The central theme
 is how machine learning can be applied to microscopy images to answer questions about the optical system
 and the object being imaged. The examples are self-contained, but generally build on one another, mirroring
 the development of the repository. Reading through them in order is likely the best way to understand
 this project.
+
+
+### Installation
+
+The project is managed with [uv](https://docs.astral.sh/uv/), so `uv sync` will set up the environment,
+`uv run pytest` will run the test suite, and `uv run jupyter lab` will open the worked examples in
+[`examples/`](examples/README.md). CUDA is used when available. Otherwise, everything also runs on CPU.
+Slowly.
 
 
 ### Forward model
