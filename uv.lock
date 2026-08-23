@@ -441,8 +441,10 @@ name = "cynosure"
 version = "0.1.0"
 source = { editable = "." }
 dependencies = [
+    { name = "numpy" },
     { name = "pandas" },
     { name = "pytorch-lightning" },
+    { name = "scipy" },
     { name = "tifffile" },
     { name = "torch", version = "2.11.0", source = { registry = "https://pypi.org/simple" }, marker = "sys_platform != 'linux' and sys_platform != 'win32'" },
     { name = "torch", version = "2.11.0+cu128", source = { registry = "https://download.pytorch.org/whl/cu128" }, marker = "sys_platform == 'linux' or sys_platform == 'win32'" },
@@ -453,15 +455,15 @@ dependencies = [
 dev = [
     { name = "jupyter" },
     { name = "matplotlib" },
-    { name = "numpy" },
     { name = "pytest" },
-    { name = "scipy" },
 ]
 
 [package.metadata]
 requires-dist = [
+    { name = "numpy", specifier = ">=2.4.4" },
     { name = "pandas", specifier = ">=3.0.5" },
     { name = "pytorch-lightning", specifier = ">=2.6.5" },
+    { name = "scipy", specifier = ">=1.17.1" },
     { name = "tifffile", specifier = ">=2026.6.1" },
     { name = "torch", marker = "sys_platform != 'linux' and sys_platform != 'win32'", specifier = ">=2.11.0" },
     { name = "torch", marker = "sys_platform == 'linux' or sys_platform == 'win32'", specifier = ">=2.11.0", index = "https://download.pytorch.org/whl/cu128" },
@@ -472,9 +474,7 @@ requires-dist = [
 dev = [
     { name = "jupyter", specifier = ">=1.1.1" },
     { name = "matplotlib", specifier = ">=3.10.8" },
-    { name = "numpy", specifier = ">=2.4.4" },
     { name = "pytest", specifier = ">=9.0.3" },
-    { name = "scipy", specifier = ">=1.17.1" },
 ]
 
 [[package]]

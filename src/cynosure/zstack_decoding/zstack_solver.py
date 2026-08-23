@@ -176,6 +176,10 @@ class ZstackSolver(pl.LightningModule):
         return self.simulator.object_distribution
 
     @property
+    def has_parameterized_object(self) -> bool:
+        return self.object_distribution.num_params > 0
+
+    @property
     def coefficients(self) -> CoefficientSpace:
         return self.simulator.coefficients
 

@@ -232,6 +232,10 @@ class CoefficientSpace(nn.Module):
                 return index
         raise KeyError(f"No coefficient block named {name!r}, found {[b.name for b in self.blocks]}")
 
+    def get_block(self, name: str) -> CoefficientBlock:
+        """Returns the coefficient block with the given name"""
+        return self.blocks[self._block_index(name)]
+
     def block_size(self, name: str) -> int:
         """Number of coefficients in a named block"""
         return self.blocks[self._block_index(name)].size

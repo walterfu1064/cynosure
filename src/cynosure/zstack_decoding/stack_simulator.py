@@ -127,6 +127,7 @@ class StackSimulator(nn.Module):
             amp_coefs: torch.Tensor,
             objects: Optional[torch.Tensor] = None,
             generator: Optional[torch.Generator] = None,
+            chunk_size: Optional[int] = None,
     ) -> torch.Tensor:
         """
         Forwards-simulates a z-stack (or a batch of such) from the given defocus values and aberrations.
@@ -159,7 +160,7 @@ class StackSimulator(nn.Module):
             raise ValueError(f"Batch dims differ for `objects` and `z`: {objects.shape[0]}, {z.shape[0]}")
 
         batch_size = z.shape[0]
-        chunk_size = self.chunk_size or batch_size
+        chunk_size = chunk_size if chunk_size is not None else (self.chunk_size or batch_size)
         image_chunks = []
         for start in range(0, batch_size, chunk_size):
             stop = min(start + chunk_size, batch_size)
@@ -231,6 +232,7 @@ class StackSimulator(nn.Module):
             offsets: Optional[torch.Tensor] = None,
             objects: Optional[torch.Tensor] = None,
             generator: Optional[torch.Generator] = None,
+            chunk_size: Optional[int] = None,
     ) -> torch.Tensor:
         """
         Forwards-simulates the normalized z-stacks at the model's own z positions
@@ -243,7 +245,14 @@ class StackSimulator(nn.Module):
         """
         with torch.no_grad():
             z = self.batched_defocus(phase_coefs.shape[0], offsets=offsets)
-            images = self.simulate_stacks(z, phase_coefs, amp_coefs, objects=objects, generator=generator)
+            images = self.simulate_stacks(
+                z,
+                phase_coefs,
+                amp_coefs,
+                objects=objects,
+                generator=generator,
+                chunk_size=chunk_size,
+            )
             if with_noise:
                 images = self.apply_noise(images, generator)
             return self.normalize_stack(images).float()
@@ -252,6 +261,7 @@ class StackSimulator(nn.Module):
             self,
             batch_size: int,
             generator: Optional[torch.Generator] = None,
+            chunk_size: Optional[int] = None,
     ) -> tuple[torch.Tensor, ...]:
         """
         Samples a set of aberrations (and an object per stack, for stochastic object
@@ -271,7 +281,13 @@ class StackSimulator(nn.Module):
         offsets = self.sample_z_jitter(batch_size, generator=generator)
         objects, object_params = self.object_distribution.sample_with_params(batch_size, generator)
         images = self.simulate_normalized_stacks(
-            phase_coefs, amp_coefs, with_noise=True, offsets=offsets, objects=objects, generator=generator
+            phase_coefs,
+            amp_coefs,
+            with_noise=True,
+            offsets=offsets,
+            objects=objects,
+            generator=generator,
+            chunk_size=chunk_size,
         )
         phase_coefs = phase_coefs + self.z_offset_to_coefficients(offsets)
         if self.object_distribution.num_params:

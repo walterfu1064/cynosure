@@ -202,7 +202,8 @@ class FlowMatchingHead(PosteriorHead):
         Also compares the truth to the sampled distribution by ordering them, then mapping
         the rankings to [0, 1]. If the truth belongs in the distrib, it's equally likely
         to be in any rank, so the distribution of rankings should be uniform. Compare the
-        stdev to that of a uniform distribution to check calibration.
+        stdev to that of a uniform distribution to check calibration. This is a quick-and-dirty
+        version of SBC. See `calibration.py` for a more thorough assessment.
 
         Compared to other PosteriorHeads, these metrics carry some noise from the random sampling.
         """
