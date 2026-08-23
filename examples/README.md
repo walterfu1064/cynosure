@@ -23,7 +23,8 @@
    images**. Makes use of the aforementioned models. Will probably continue to evolve as ideas strike my fancy.
    1. [`information_theory/example_3a.ipynb`](information_theory/example_3a.ipynb) - Analysis of how the
       predicted uncertainty in each coefficient varies as a function of defocus, and comparing the
-      model's uncertainty against the fundamental van Trees limit.
+      model's uncertainty against the fundamental van Trees limit. Also, calibration of the trained
+      posterior using SBC.
    2. [`information_theory/example_3b.ipynb`](information_theory/example_3b.ipynb) - Analysis of information in
       the forwards model by itself, with no trained network involved. Playing with the results leads to the neat
       observation that the total available information peaks roughly one depth-of-field from the focal plane.
