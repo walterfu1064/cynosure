@@ -46,8 +46,8 @@ def get_default_training_config(
 
 def get_default_mixture_config(
         num_components: int = 2,
-        mixing_warmup_epochs: int = 10,
-        min_allocation: float = 0.05,
+        mixing_warmup_epochs: int = 0,
+        min_allocation: float = 0.0,
         mixing_entropy_weight: float = 0.5,
 ) -> MixtureConfig:
     return MixtureConfig(
