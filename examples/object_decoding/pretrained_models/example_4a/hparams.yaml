@@ -23,8 +23,8 @@ hidden_channels: !!python/tuple
 mixture_cfg: !!python/object/new:cynosure.config.MixtureConfig
   state:
   - 2
-  - 10
-  - 0.05
+  - 0
+  - 0.0
   - 0.5
 noise_cfg: !!python/object/new:cynosure.config.NoiseConfig
   state:
@@ -129,8 +129,8 @@ z_objective: !!python/object/apply:torch._utils._rebuild_tensor_v2
     gAKKCmz8nEb5IGqoUBkugAJN6QMugAJ9cQAoWBAAAABwcm90b2NvbF92ZXJzaW9ucQFN6QNYDQAA
     AGxpdHRsZV9lbmRpYW5xAohYCgAAAHR5cGVfc2l6ZXNxA31xBChYBQAAAHNob3J0cQVLAlgDAAAA
     aW50cQZLBFgEAAAAbG9uZ3EHSwR1dS6AAihYBwAAAHN0b3JhZ2VxAGN0b3JjaApGbG9hdFN0b3Jh
-    Z2UKcQFYCQAAADY0MDQyNTA3MnECWAMAAABjcHVxA0sBTnRxBFEugAJdcQBYCQAAADY0MDQyNTA3
-    MnEBYS4BAAAAAAAAAAAAAAA=
+    Z2UKcQFYCQAAADYxOTIxNzg0MHECWAMAAABjcHVxA0sBTnRxBFEugAJdcQBYCQAAADYxOTIxNzg0
+    MHEBYS4BAAAAAAAAAAAAAAA=
 - 0
 - !!python/tuple
   - 1
