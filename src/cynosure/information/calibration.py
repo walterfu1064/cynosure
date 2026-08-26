@@ -36,6 +36,7 @@ def get_expected_rank_statistics(
 def calculate_rank_statistics(
         targets: torch.Tensor,
         samples: torch.Tensor,
+        chunk_size: Optional[int] = None,
 ) -> torch.Tensor:
     """
     Given a set of target coefficients (`batch_size` independent draws) and
@@ -49,6 +50,7 @@ def calculate_rank_statistics(
     Arguments:
     - targets: [batch_size, num_variables]
     - samples: [batch_size, num_samples, num-variables]
+    - chunk_size: if given, split the batch dimension into chunks to reduce peak memory
     Returns:
     - ranks: [batch_size, num_variables] rankings in [0, 1]
     """
@@ -61,7 +63,16 @@ def calculate_rank_statistics(
             f"Target and samples have different variable counts {targets.shape[-1]} and {samples.shape[-1]}"
         )
     B, S, N = samples.shape
-    ranks = (samples < targets.unsqueeze(1)).sum(dim=1) / S  # [B, N], in [0, 1]
+    chunk_size = chunk_size or B
+
+    ranks = []
+    for start in range(0, B, chunk_size):
+        stop = min(start + chunk_size, B)
+        targets_chunk = targets[start:stop]
+        samples_chunk = samples[start:stop]
+        ranks_chunk = (samples_chunk < targets_chunk.unsqueeze(1)).sum(dim=1) / S
+        ranks.append(ranks_chunk)
+    ranks = torch.cat(ranks, dim=0)  # [B, N], in [0, 1]
     return ranks
 
 
@@ -72,7 +83,7 @@ def generate_and_predict(
         chunk_size: Optional[int] = None,
         generator: Optional[torch.Generator] = None,
         device: Optional[str | torch.device] = None,
-) -> tuple[tuple[torch.Tensor, ...], tuple[torch.Tensor, ...]]:
+) -> tuple[list[torch.Tensor], list[torch.Tensor]]:
     """
     Generates a batch of synthetic images + their aberration labels, then
     runs inference on the images and samples the predicted posteriors.
@@ -80,14 +91,25 @@ def generate_and_predict(
     solver = solver.eval()
     if device is not None:
         solver = solver.to(device)
+
+    chunk_size = chunk_size or batch_size
+    coef_blocks = []
+    pred_coef_blocks = []
     with torch.inference_mode():
-        example_data = solver.simulator.create_examples(
-            batch_size,
-            generator=generator,
-            chunk_size=chunk_size,
-        )
-        images, coef_blocks = example_data[0], example_data[1:]  # [B, Z, H, W], [[B, N], ...]
-        pred_coef_blocks = solver.predict_samples(images, num_samples)  # [[B, S, N], ...]
+        for start in range(0, batch_size, chunk_size):
+            stop = min(start + chunk_size, batch_size)
+            example_data = solver.simulator.create_examples(
+                stop - start,
+                generator=generator,
+            )
+            images = example_data[0]  # [chunk, Z, H, W]
+            coef_blocks_chunk = [cb.cpu() for cb in example_data[1:]]  # [[chunk, N], ...]
+            pred_coef_blocks_chunk = solver.predict_samples(images, num_samples)  # [[chunk, S, N], ...]
+            pred_coef_blocks_chunk = [pcb.cpu() for pcb in pred_coef_blocks_chunk]
+            coef_blocks.append(coef_blocks_chunk)
+            pred_coef_blocks.append(pred_coef_blocks_chunk)
+    coef_blocks = [torch.cat(cb, dim=0) for cb in zip(*coef_blocks)]  # [[B, N], ...]
+    pred_coef_blocks = [torch.cat(pcb, dim=0) for pcb in zip(*pred_coef_blocks)]  # [[B, S, N], ...]
     return coef_blocks, pred_coef_blocks
 
 
