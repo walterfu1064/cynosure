@@ -63,7 +63,7 @@ from ..object_distribution import ObjectDistribution
 from ..utilities.ode_solvers import ODESolver
 
 
-def _twin_parity_signs(nm_indices: torch.Tensor, negate_even_n: bool) -> torch.Tensor:
+def twin_parity_signs(nm_indices: torch.Tensor, negate_even_n: bool) -> torch.Tensor:
     """
     Returns the [N,] signs (+/-1) that Zernike coefficients pick up under negating z,
     the even-n phase Zernikes (`negate_even_n = True`), and the odd-n amplitude Zernikes
@@ -148,12 +148,12 @@ class ZstackSolver(pl.LightningModule):
             propagator = self.simulator.propagator
             self.register_buffer(
                 "twin_phase_signs",
-                _twin_parity_signs(propagator.phase_projector.nm_indices, negate_even_n=True).to(self.ftype),
+                twin_parity_signs(propagator.phase_projector.nm_indices, negate_even_n=True).to(self.ftype),
                 persistent=False,
             )
             self.register_buffer(
                 "twin_amp_signs",
-                _twin_parity_signs(propagator.amp_projector.nm_indices, negate_even_n=False).to(self.ftype),
+                twin_parity_signs(propagator.amp_projector.nm_indices, negate_even_n=False).to(self.ftype),
                 persistent=False,
             )
 
