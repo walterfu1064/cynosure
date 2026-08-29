@@ -28,6 +28,9 @@
    2. [`information_theory/example_3b.ipynb`](information_theory/example_3b.ipynb) - Analysis of information in
       the forwards model by itself, with no trained network involved. Playing with the results leads to the neat
       observation that the total available information peaks roughly one depth-of-field from the focal plane.
+   3. [`information_theory/example_3c.ipynb`](information_theory/example_3c.ipynb) - SBC calibration of the
+      flow-matching model, analogous to `example_3a.ipynb`. The defocus term appears stubbornly underconfident,
+      and remains an open question.
 4. [`object_decoding`](object_decoding) - **Simultaneously learning aberrations and an unknown object.**
    1. [`object_decoding/example_4a.ipynb`](object_decoding/example_4a.ipynb) - Extension of `example_3a.ipynb`
           to vary the bead diameter too, using a model trained with randomly sampled beads.
