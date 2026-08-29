@@ -123,6 +123,87 @@ class CnnDecoder_DetachedHead(CnnDecoder):
         return torch.cat([main_outputs, detached_outputs], dim=1)
 
 
+class SetEncoder(nn.Module):
+    """
+    Strided, framewise CNN followed by several attention layers and cross-Z attention
+    pooling, encoding an unordered, dynamically-sized z-stack of images into a latent vector.
+    """
+    def __init__(
+            self,
+            spatial_hidden_channels: Sequence[int],
+            image_embedding_dims: int,
+            z_embedding_dims: int,
+            num_attention_layers: int,
+            num_attention_heads: int,
+            attention_feedforward_dim: int,
+            spatial_size: int,
+    ):
+        super().__init__()
+
+        assert len(spatial_hidden_channels) >= 1
+
+        self.Ef = image_embedding_dims
+        self.Ez = z_embedding_dims
+        self.E = self.Ef + self.Ez
+
+        self.framewise_cnn = CnnEncoder(
+            in_channels=1,
+            spatial_hidden_channels=spatial_hidden_channels,
+            embedding_dims=self.Ef,
+            spatial_size=spatial_size,
+        )
+
+        self.z_encoder = FourierEmbed(self.Ez)
+
+        self.transformers = nn.Sequential(*[
+            nn.TransformerEncoderLayer(
+                d_model=self.E,
+                nhead=num_attention_heads,
+                batch_first=True,
+                dim_feedforward=attention_feedforward_dim,
+            )
+            for _ in range(num_attention_layers)
+        ])
+
+        self.z_pool = nn.MultiheadAttention(
+            embed_dim=self.E,
+            num_heads=num_attention_heads,
+            batch_first=True,
+        )
+
+        self.z_query = nn.Parameter(
+            torch.randn(1, 1, self.E) / math.sqrt(self.E)
+        )  # query 1 latent from z-planes
+
+    def forward(self, x: torch.Tensor, z: torch.Tensor) -> tuple[torch.Tensor, torch.Tensor]:
+        """
+        Arguments:
+        - x: batch of z-stacks, [B, Z, H, W]
+        - z: batch of z-positions, [Z,]
+        Returns:
+        - pool_output: [B, E] single embedding vector across all z-planes
+        - pool_weights: [B, num_heads, Z] attention weights each head applies to each z-plane
+        """
+        B, Z, H, W = x.shape
+
+        frame_emb = self.framewise_cnn(x.reshape(B*Z, 1, H, W)).reshape(B, Z, -1)  # [B, Z, H, W] -> [B, Z, Ef]
+        z_emb = self.z_encoder(z.unsqueeze(0))  # [Z,] -> [B=1, Z] -> [B=1, Z, Ez]
+        z_emb = z_emb.expand((B, Z, -1))  # [B, Z, Ez]
+        emb = torch.cat([z_emb, frame_emb], dim=-1)  # [B, Z, E]
+
+        emb_out = self.transformers(emb)  # [B, Z, E]
+        pool_output, pool_weights = self.z_pool(
+            self.z_query.expand(B, -1, -1),
+            emb_out,
+            emb_out,
+            average_attn_weights=False,
+        )  # [B, 1, E], [B, num_heads, 1, Z]
+        pool_output = pool_output.squeeze(-2)  # [B, E]
+        pool_weights = pool_weights.squeeze(-2)  # [B, num_heads, Z]
+
+        return pool_output, pool_weights
+
+
 class _LinearBlock(nn.Module):
     """
     Pre-normalized linear block.
