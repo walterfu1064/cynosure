@@ -26,7 +26,7 @@ import torch.nn as nn
 import torch.nn.functional as F
 
 from .coefficients import CoefficientSpace
-from .posterior_heads import EncoderSpec, PosteriorHead
+from .posterior_heads import PosteriorHead
 from .submodules import VelocityField
 from ..config import VelocityConfig
 from ..utilities.ode_solvers import EulerSolver, ODESolver
@@ -46,7 +46,7 @@ class FlowMatchingHead(PosteriorHead):
     def __init__(
             self,
             coefficients: CoefficientSpace,
-            encoder: EncoderSpec,
+            trunk: nn.Module,
             *,
             cfg: VelocityConfig,
             num_val_samples: int = 64,
@@ -57,35 +57,37 @@ class FlowMatchingHead(PosteriorHead):
         if ode_solver is None:  # instantiate fresh, in case future solvers hold mutable state
             ode_solver = EulerSolver()
         self.ode_solver = ode_solver
-        super().__init__(coefficients, encoder)
+        super().__init__(coefficients, trunk)
 
     @property
     def flow_dims(self) -> int:
         """Dimension of the flow (i.e. the non-pinned coefficients in whitened space)"""
         return self._num_kept
 
-    def build_network(self, encoder: EncoderSpec) -> nn.Module:
-        """Sets up the conditional velocity field"""
-        return VelocityField(
-            in_channels=encoder.in_channels,
-            spatial_hidden_channels=encoder.spatial_hidden_channels,
-            image_embedding_dims=encoder.embedding_dims,
-            spatial_size=encoder.spatial_size,
+    @property
+    def out_dims(self) -> int:
+        return 0  # no projections, the trunk's latent is itself the conditioning vector
+
+    def build_modules(self) -> None:
+        """Sets up the conditional velocity field over the trunk's latent space"""
+        self.velocity_field = VelocityField(
             flow_dims=self.flow_dims,
+            conditioning_dims=self.trunk.embedding_dims,
             time_embedding_dims=self.vel_cfg.time_embedding_dims,
             hidden_dims=self.vel_cfg.hidden_dims,
             is_residual=self.vel_cfg.is_residual,
             residual_dims=self.vel_cfg.residual_dims,
         )
 
-    def forward(self, images: torch.Tensor) -> torch.Tensor:
+    def forward(self, images: torch.Tensor, z: Optional[torch.Tensor] = None) -> torch.Tensor:
         """
-        Encodes a [B, num_z, H, W] batch of z-stacks as [B, embedding_dims] conditioning vectors.
+        Encodes a [B, Z, H, W] batch of z-stacks as [B, embedding_dims] conditioning vectors.
+        Same as the base forward with no projections, overridden just to document the difference.
 
         Note: unlike the other PosterHeads, this is not a coefficient estimate.
         Inferring the aberration coefficients requires flow integration (see `whitened_samples`).
         """
-        return self.decoder.encode(images)
+        return self.trunk(images, z)
 
     # Flow matching
 
@@ -130,7 +132,7 @@ class FlowMatchingHead(PosteriorHead):
         """
         x_1 = self.coefficients.gather_nonpinned(targets)
         x_t, t, u_t = self.sample_flow_pairs(x_1, generator)
-        v_t = self.decoder(x_t, t, encoded)
+        v_t = self.velocity_field(x_t, t, encoded)
         cfm_loss = F.mse_loss(v_t, u_t)
         return cfm_loss, {"cfm_loss": cfm_loss}
 
@@ -176,7 +178,7 @@ class FlowMatchingHead(PosteriorHead):
         def velocity(x: torch.Tensor, t: float) -> torch.Tensor:
             """Expands scalar t to batch, to keep the ODESolver call clean"""
             t_batch = torch.full((x.shape[0],), t, dtype=x.dtype, device=x.device)
-            return self.decoder(x, t_batch, y_expanded)
+            return self.velocity_field(x, t_batch, y_expanded)
 
         x_1 = self.ode_solver.integrate(velocity, x_0, num_steps)
         return x_1.reshape(batch_size, num_samples, self.flow_dims)

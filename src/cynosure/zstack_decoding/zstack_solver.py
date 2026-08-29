@@ -39,8 +39,8 @@ from .flow_matching_head import FlowMatchingHead
 from .jitter_modes import JitterMode, NoJitter
 from .noise_model import NoiseModel
 from .posterior_heads import (
+    CnnEncoderSpec,
     CovarianceHead,
-    EncoderSpec,
     HeadFactory,
     HeteroscedasticHead,
     MixtureHead,
@@ -157,13 +157,13 @@ class ZstackSolver(pl.LightningModule):
                 persistent=False,
             )
 
-        encoder = EncoderSpec(
+        encoder_spec = CnnEncoderSpec(
             in_channels=self.simulator.num_z,
             spatial_hidden_channels=hidden_channels,
             embedding_dims=embedding_dims,
             spatial_size=sim_cfg.object_grid_size,
         )
-        self.head: PosteriorHead = head_factory(self.simulator.coefficients, encoder)
+        self.head: PosteriorHead = head_factory(self.simulator.coefficients, encoder_spec.build())
 
     # Convenience accessors
 
@@ -204,8 +204,8 @@ class ZstackSolver(pl.LightningModule):
         return self.simulator.defocus_phase_coefs
 
     @property
-    def decoder(self) -> nn.Module:
-        return self.head.decoder
+    def trunk(self) -> nn.Module:
+        return self.head.trunk
 
     def configure_optimizers(self):
         param_groups = [{

@@ -42,6 +42,8 @@ class CnnEncoder(nn.Module):
 
         assert len(spatial_hidden_channels) >= 1
 
+        self.embedding_dims = embedding_dims
+
         cnn = []
         for in_ch, out_ch in pairwise([in_channels, *spatial_hidden_channels]):
             cnn.append(conv_norm_act(in_ch, out_ch, 3))
@@ -62,71 +64,33 @@ class CnnEncoder(nn.Module):
         return self.embed(self.cnn(x))
 
 
-class CnnDecoder(CnnEncoder):
+class ZstackCnnEncoder(CnnEncoder):
     """
-    Extends CnnEncoder with a linear head, for decoding aberration coefficients
-    from a z-stack of images.
+    CNN trunk that encodes a z-stack together, treating the z-planes as input channels.
+    Just a wrapper around `CnnEncoder` that adds an unused `z` argument for API consistency
+    with other encoders.
 
-    [B, Cin, H, W] -> [B, E] -> [B, Cout]
+    Might delete this class later, I'm torn between reducing clutter vs. standardizing APIs.
+
+    [B, Z, H, W] -> [B, E]
     """
-    def __init__(
-            self,
-            in_channels: int,
-            spatial_hidden_channels: Sequence[int],
-            embedding_dims: int,
-            out_dims: int,
-            spatial_size: int,
-    ):
-        super().__init__(
-            in_channels=in_channels,
-            spatial_hidden_channels=spatial_hidden_channels,
-            embedding_dims=embedding_dims,
-            spatial_size=spatial_size,
-        )
-        self.project = nn.Linear(embedding_dims, out_dims)
-
-    def forward(self, x: torch.Tensor) -> torch.Tensor:
-        return self.project(self.embed(self.cnn(x)))
-
-
-class CnnDecoder_DetachedHead(CnnDecoder):
-    """
-    Extends CnnDecoder with a second head from a detached copy of the embedding.
-
-    Allows aux outputs (e.g., uncertainty params) to train without mucking up the
-    main outputs in the shared trunk.
-
-    The aux outputs are appended to the main ones along the channel dim before outputting
-    """
-    def __init__(
-            self,
-            in_channels: int,
-            spatial_hidden_channels: Sequence[int],
-            embedding_dims: int,
-            out_dims: int,
-            detached_out_dims: int,
-            spatial_size: int,
-    ):
-        super().__init__(
-            in_channels=in_channels,
-            spatial_hidden_channels=spatial_hidden_channels,
-            embedding_dims=embedding_dims,
-            out_dims=out_dims,
-            spatial_size=spatial_size,
-        )
-        self.detached_head = nn.Linear(embedding_dims, detached_out_dims)
-
-    def forward(self, x: torch.Tensor) -> torch.Tensor:
-        emb = self.embed(self.cnn(x))
-        main_outputs = self.project(emb)
-        detached_outputs = self.detached_head(emb.detach())
-        return torch.cat([main_outputs, detached_outputs], dim=1)
+    def forward(self, x: torch.Tensor, z: Optional[torch.Tensor] = None) -> torch.Tensor:
+        """
+        Passed z-positions are unused, and are only included for API consistency.
+        For this class, the stack geometry is already baked into the weights.
+        """
+        return super().forward(x)
 
 
 class SetEncoder(nn.Module):
     """
     Strided, framewise CNN followed by several attention layers and cross-Z attention
     pooling, encoding an unordered, dynamically-sized z-stack of images into a latent vector.
+
+    Each frame is catted with a Fourier embedding of its z-position, so staack geometry
+    is per-call rather than being baked into the weights.
+
+    [B, Z, H, W] + [B, Z] -> [B, E]
     """
     def __init__(
             self,
@@ -142,22 +106,20 @@ class SetEncoder(nn.Module):
 
         assert len(spatial_hidden_channels) >= 1
 
-        self.Ef = image_embedding_dims
-        self.Ez = z_embedding_dims
-        self.E = self.Ef + self.Ez
+        self.embedding_dims = image_embedding_dims + z_embedding_dims
 
         self.framewise_cnn = CnnEncoder(
             in_channels=1,
             spatial_hidden_channels=spatial_hidden_channels,
-            embedding_dims=self.Ef,
+            embedding_dims=image_embedding_dims,
             spatial_size=spatial_size,
         )
 
-        self.z_encoder = FourierEmbed(self.Ez)
+        self.z_encoder = FourierEmbed(z_embedding_dims)
 
         self.transformers = nn.Sequential(*[
             nn.TransformerEncoderLayer(
-                d_model=self.E,
+                d_model=self.embedding_dims,
                 nhead=num_attention_heads,
                 batch_first=True,
                 dim_feedforward=attention_feedforward_dim,
@@ -166,30 +128,35 @@ class SetEncoder(nn.Module):
         ])
 
         self.z_pool = nn.MultiheadAttention(
-            embed_dim=self.E,
+            embed_dim=self.embedding_dims,
             num_heads=num_attention_heads,
             batch_first=True,
         )
 
         self.z_query = nn.Parameter(
-            torch.randn(1, 1, self.E) / math.sqrt(self.E)
+            torch.randn(1, 1, self.embedding_dims) / math.sqrt(self.embedding_dims)
         )  # query 1 latent from z-planes
 
-    def forward(self, x: torch.Tensor, z: torch.Tensor) -> tuple[torch.Tensor, torch.Tensor]:
+        # Running stash of [B, num_heads, Z] attention weights each head applies to each z, as a diagnostic:
+        self.last_pool_weights: Optional[torch.Tensor] = None
+
+    def forward(self, x: torch.Tensor, z: Optional[torch.Tensor]) -> torch.Tensor:
         """
         Arguments:
         - x: batch of z-stacks, [B, Z, H, W]
-        - z: batch of z-positions, [Z,]
+        - z: batch of z-positions, [B, Z] or [Z,]
         Returns:
-        - pool_output: [B, E] single embedding vector across all z-planes
-        - pool_weights: [B, num_heads, Z] attention weights each head applies to each z-plane
+        - [B, E] single embedding vector across all z-planes
         """
+        if z is None:
+            raise ValueError("SetEncoder requires the z-positions of the stack")
         B, Z, H, W = x.shape
+        if z.ndim == 1:  # interpret as [Z,] shared across batch
+            z = z.unsqueeze(0).expand(B, Z)
 
         frame_emb = self.framewise_cnn(x.reshape(B*Z, 1, H, W)).reshape(B, Z, -1)  # [B, Z, H, W] -> [B, Z, Ef]
-        z_emb = self.z_encoder(z.unsqueeze(0))  # [Z,] -> [B=1, Z] -> [B=1, Z, Ez]
-        z_emb = z_emb.expand((B, Z, -1))  # [B, Z, Ez]
-        emb = torch.cat([z_emb, frame_emb], dim=-1)  # [B, Z, E]
+        z_emb = self.z_encoder(z)  # [B, Z] -> [B, Z, Ez]
+        emb = torch.cat([z_emb, frame_emb], dim=-1)  # [B, Z, Ez+Ef]
 
         emb_out = self.transformers(emb)  # [B, Z, E]
         pool_output, pool_weights = self.z_pool(
@@ -198,10 +165,9 @@ class SetEncoder(nn.Module):
             emb_out,
             average_attn_weights=False,
         )  # [B, 1, E], [B, num_heads, 1, Z]
-        pool_output = pool_output.squeeze(-2)  # [B, E]
-        pool_weights = pool_weights.squeeze(-2)  # [B, num_heads, Z]
 
-        return pool_output, pool_weights
+        self.last_pool_weights = pool_weights.squeeze(-2).detach()  # stash [B, num_heads, Z] diagnostic
+        return pool_output.squeeze(-2)  # [B, E]
 
 
 class _LinearBlock(nn.Module):
@@ -319,18 +285,17 @@ class VelocityField(nn.Module):
     """
     Conditional velocity field for flow matching in coefficient space.
 
-    Encapculates three modules:
-    - encoder: CNN that encodes a z-stack into a conditioning vector `y`
+    Encapsulates two modules:
     - time_embed: Fourier embedding for the flow time `t`
     - mlp: predicts `v(x_t, t | y)`
+
+    Takes a conditioning vector `y` from an encoder in the owning PosteriorHead,
+    so this module only handles the flow-space dynamics themselves.
     """
     def __init__(
             self,
-            in_channels: int,
-            spatial_hidden_channels: Sequence[int],
-            image_embedding_dims: int,
-            spatial_size: int,
             flow_dims: int,
+            conditioning_dims: int,
             time_embedding_dims: int,
             hidden_dims: Sequence[int],
             is_residual: bool = True,
@@ -338,33 +303,15 @@ class VelocityField(nn.Module):
     ):
         super().__init__()
 
-        self.encoder = CnnEncoder(
-            in_channels=in_channels,
-            spatial_hidden_channels=spatial_hidden_channels,
-            embedding_dims=image_embedding_dims,
-            spatial_size=spatial_size,
-        )
-
         self.time_embed = FourierEmbed(time_embedding_dims)
 
         self.mlp = MLP(
-            flow_dims + time_embedding_dims + image_embedding_dims,
+            flow_dims + time_embedding_dims + conditioning_dims,
             hidden_dims,
             flow_dims,
             is_residual=is_residual,
             residual_dims=residual_dims,
         )
-
-    def encode(self, images: torch.Tensor) -> torch.Tensor:
-        """
-        Encodes the images to embedding vectors for the velocity field to condition on.
-
-        Arguments:
-        - images: [B, Z, H, W] batched z-stacks (or batched single images)
-        Returns:
-        - [B, E], referred to elsewhere as `y`
-        """
-        return self.encoder(images)
 
     def forward(self, x_t: torch.Tensor, t: torch.Tensor, y: torch.Tensor) -> torch.Tensor:
         """

@@ -1,8 +1,9 @@
 """
 Output heads that predict the coefficient posteriors in various ways.
 
-Each PosteriorHead builds its own network, decides how to interpret that network's
-outputs, and handles its own loss calculations and validation metrics.
+Each PosteriorHead reads the latent vector produced by an image trunk (built from an
+EncoderSpec), sizes its own output projections over it, decides how to interpret those
+projections' outputs, and handles its own loss calculations and validation metrics.
 
 By and large, the ZstackSolver should only worry about a handful of call sites:
 - `losses` -> called during training
@@ -22,24 +23,61 @@ import math
 from abc import ABC, abstractmethod
 from collections.abc import Sequence
 from dataclasses import dataclass
-from typing import Callable, Optional
+from typing import Callable, Optional, Union
 
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
 
 from .coefficients import CoefficientSpace
-from .submodules import CnnDecoder, CnnDecoder_DetachedHead
+from .submodules import SetEncoder, ZstackCnnEncoder
 from ..config import MixtureConfig
 
 
-@dataclass(frozen=True)
-class EncoderSpec:
-    """Architecture of the image encoder that every PosteriorHead builds from"""
+@dataclass(frozen=True, slots=True)
+class CnnEncoderSpec:
+    """Architecture of a fixed-geometry CNN image trunk for a PosteriorHead"""
     in_channels: int  # z-planes per stack
     spatial_hidden_channels: Sequence[int]
     embedding_dims: int
     spatial_size: int  # object grid side length
+
+    def build(self) -> nn.Module:
+        return ZstackCnnEncoder(
+            in_channels=self.in_channels,
+            spatial_hidden_channels=self.spatial_hidden_channels,
+            embedding_dims=self.embedding_dims,
+            spatial_size=self.spatial_size,
+        )
+
+
+@dataclass(frozen=True, slots=True)
+class SetEncoderSpec:
+    """Architecture of a dynamic-z, transformer-based image-set trunk for a PosteriorHead"""
+    spatial_hidden_channels: Sequence[int]
+    image_embedding_dims: int
+    z_embedding_dims: int
+    num_attention_layers: int
+    num_attention_heads: int
+    attention_feedforward_dim: int
+    spatial_size: int  # object grid side length
+
+    def build(self) -> nn.Module:
+        return SetEncoder(
+            spatial_hidden_channels=self.spatial_hidden_channels,
+            image_embedding_dims=self.image_embedding_dims,
+            z_embedding_dims=self.z_embedding_dims,
+            num_attention_layers=self.num_attention_layers,
+            num_attention_heads=self.num_attention_heads,
+            attention_feedforward_dim=self.attention_feedforward_dim,
+            spatial_size=self.spatial_size,
+        )
+
+
+EncoderSpec = Union[
+    CnnEncoderSpec,
+    SetEncoderSpec,
+]
 
 
 class CholeskyParameterization(nn.Module):
@@ -85,17 +123,23 @@ class CholeskyParameterization(nn.Module):
 
 
 """
-Used by a ZstackSolver to build a PosteriorHead.
+Used by a ZstackSolver to build a PosteriorHead from the coefficient space and a built trunk.
 The class itself, or, if a config is needed, the class bound to that config via `functools.partial`.
 """
-HeadFactory = Callable[[CoefficientSpace, EncoderSpec], "PosteriorHead"]
+HeadFactory = Callable[[CoefficientSpace, nn.Module], "PosteriorHead"]
 
 
 class PosteriorHead(nn.Module, ABC):
     """
     Base class for the posterior predicted by a solver.
 
-    Each subclasses will build a network, interpret its raw output, and define a loss.
+    Each subclasses will build a linear projector over an encoder that maps `(images, z)` -> `[B, emb]`,
+    interpret its raw output, and define a loss. Subclasses declare their projector widths via
+    `out_dims` and (if applicable) `detached_out_dims`.
+
+    If a detached projector head is used, it reads from a detached copy of the latent space, and
+    appends its outputs to the main ones along the channel dim. This lets aux outputs (e.g.,
+    uncertainty params) train without mucking up the main outputs in the shared trunk.
 
     Nothing outside the PosteriorHead should try to interpreting the outputs
     of `forward`. Instead, external callers should access `whitened_means`,
@@ -105,28 +149,52 @@ class PosteriorHead(nn.Module, ABC):
     StackSimulator already owns it, else the state dict would register it twice.
     """
 
-    def __init__(self, coefficients: CoefficientSpace, encoder: EncoderSpec):
+    def __init__(self, coefficients: CoefficientSpace, trunk: nn.Module):
         super().__init__()
         self._coefficients = [coefficients]  # list-wrap so not registered as a child, kind of hacky
-        self.encoder = encoder
-        self.decoder = self.build_network(encoder)
+        self.trunk = trunk
+        self.build_modules()
+        self.project = nn.Linear(trunk.embedding_dims, self.out_dims) if self.out_dims else None
+        self.detached_project = (
+            nn.Linear(trunk.embedding_dims, self.detached_out_dims) if self.detached_out_dims else None
+        )
+        self.init_projections()
 
     @property
     def coefficients(self) -> CoefficientSpace:
         """The coefficient space this head predicts over (owned by the simulator)"""
         return self._coefficients[0]
 
+    @property
     @abstractmethod
-    def build_network(self, encoder: EncoderSpec) -> nn.Module:
-        """Builds the network this head reads from"""
+    def out_dims(self) -> int:
+        """Width of the main projection (0 to skip both projections and expose the latent directly)"""
         ...
 
-    def forward(self, images: torch.Tensor) -> torch.Tensor:
+    @property
+    def detached_out_dims(self) -> int:
+        """Width of the detached projection (default 0 skips)"""
+        return 0
+
+    def build_modules(self) -> None:
+        """Hook for subclasses to create modules the projection widths depend on (e.g., a CholeskyParameterization)"""
+
+    def init_projections(self) -> None:
+        """Hook for subclasses to seed the projection weights after they're built"""
+
+    def forward(self, images: torch.Tensor, z: Optional[torch.Tensor] = None) -> torch.Tensor:
         """
-        Runs the network on a [B, num_z, H, W] batch of images.
+        Runs the trunk and projection(s) on a [B, Z, H, W] batch of images taken at
+        z-positions `z` (ignored by fixed-geometry trunks).
         The results represent different things, depending on the head type.
         """
-        return self.decoder(images)
+        latent = self.trunk(images, z)
+        if self.project is None:
+            return latent
+        outputs = self.project(latent)
+        if self.detached_project is not None:
+            outputs = torch.cat([outputs, self.detached_project(latent.detach())], dim=1)
+        return outputs
 
     @abstractmethod
     def whitened_means(self, encoded: torch.Tensor) -> torch.Tensor:
@@ -209,14 +277,9 @@ class PointHead(PosteriorHead):
     Pointwise maximum likelihood estimator for each coefficient.
     """
 
-    def build_network(self, encoder: EncoderSpec) -> nn.Module:
-        return CnnDecoder(
-            in_channels=encoder.in_channels,
-            spatial_hidden_channels=encoder.spatial_hidden_channels,
-            embedding_dims=encoder.embedding_dims,
-            out_dims=self.coefficients.num_coefs,
-            spatial_size=encoder.spatial_size,
-        )
+    @property
+    def out_dims(self) -> int:
+        return self.coefficients.num_coefs
 
     def whitened_means(self, encoded: torch.Tensor) -> torch.Tensor:
         return encoded  # means are the only things predicted
@@ -240,14 +303,9 @@ class HeteroscedasticHead(PosteriorHead):
     Each coefficient is modeled as its own Gaussian, so correlations and multimodality are still not handled.
     """
 
-    def build_network(self, encoder: EncoderSpec) -> nn.Module:
-        return CnnDecoder(
-            in_channels=encoder.in_channels,
-            spatial_hidden_channels=encoder.spatial_hidden_channels,
-            embedding_dims=encoder.embedding_dims,
-            out_dims=2 * self.coefficients.num_coefs,  # mu and log(sigma) each
-            spatial_size=encoder.spatial_size,
-        )
+    @property
+    def out_dims(self) -> int:
+        return 2 * self.coefficients.num_coefs  # mu and log(sigma) each
 
     def _whitened_normal(self, encoded: torch.Tensor) -> torch.distributions.Normal:
         """Reads the raw decoder output as a per-coefficient Gaussian in whitened space"""
@@ -306,29 +364,25 @@ class CovarianceHead(PosteriorHead):
     Handles correlations (at least, pairwise ones), but still not multimodality.
 
     The covariance is represented by its Cholesky factor, flattened and predicted by
-    an extra, detached, decoder head.
+    an extra, detached, projector.
     """
 
-    def build_network(self, encoder: EncoderSpec) -> nn.Module:
-        """
-        Builds a decoder with a detached head for the Cholesky factor.
-        Initializes the detached head to 0 covariance.
-        """
+    def build_modules(self) -> None:
         self.cholesky = CholeskyParameterization(self.coefficients.num_nonpinned_coefs)
 
-        decoder = CnnDecoder_DetachedHead(
-            in_channels=encoder.in_channels,
-            spatial_hidden_channels=encoder.spatial_hidden_channels,
-            embedding_dims=encoder.embedding_dims,
-            out_dims=self.coefficients.num_coefs,
-            detached_out_dims=self.cholesky.num_entries,
-            spatial_size=encoder.spatial_size,
-        )
+    @property
+    def out_dims(self) -> int:
+        return self.coefficients.num_coefs
 
-        nn.init.zeros_(decoder.detached_head.weight)
+    @property
+    def detached_out_dims(self) -> int:
+        return self.cholesky.num_entries
+
+    def init_projections(self) -> None:
+        """Initializes the detached projection to 0 covariance"""
+        nn.init.zeros_(self.detached_project.weight)
         with torch.no_grad():
-            decoder.detached_head.bias.copy_(self.cholesky.initial_bias())
-        return decoder
+            self.detached_project.bias.copy_(self.cholesky.initial_bias())
 
     def whitened_means(self, encoded: torch.Tensor) -> torch.Tensor:
         return encoded[:, :self.coefficients.num_coefs]  # means, no covariance
@@ -387,7 +441,7 @@ class MixtureHead(PosteriorHead):
     def __init__(
             self,
             coefficients: CoefficientSpace,
-            encoder: EncoderSpec,
+            trunk: nn.Module,
             *,
             cfg: MixtureConfig,
     ):
@@ -395,36 +449,34 @@ class MixtureHead(PosteriorHead):
         self.mixing_warmup_epochs = cfg.mixing_warmup_epochs
         self.min_allocation = cfg.min_allocation
         self.mixing_entropy_weight = cfg.mixing_entropy_weight
-        super().__init__(coefficients, encoder)
+        super().__init__(coefficients, trunk)
 
-    def build_network(self, encoder: EncoderSpec) -> nn.Module:
-        """
-        Builds a decoder with a detached head for the Cholesky factor and mixing logits.
-        Initializes the detached head to 0 covariance.
-        Seeds the means with an O(1) spread to encourage specialization.
-        """
+    def build_modules(self) -> None:
         self.cholesky = CholeskyParameterization(self.coefficients.num_nonpinned_coefs)
 
-        decoder = CnnDecoder_DetachedHead(
-            in_channels=encoder.in_channels,
-            spatial_hidden_channels=encoder.spatial_hidden_channels,
-            embedding_dims=encoder.embedding_dims,
-            out_dims=self.num_components * self.coefficients.num_coefs,
-            detached_out_dims=self.num_components + self.num_components * self.cholesky.num_entries,
-            spatial_size=encoder.spatial_size,
-        )
+    @property
+    def out_dims(self) -> int:
+        return self.num_components * self.coefficients.num_coefs  # per-component means
 
-        nn.init.zeros_(decoder.detached_head.weight)
+    @property
+    def detached_out_dims(self) -> int:
+        return self.num_components + self.num_components * self.cholesky.num_entries  # logits + Cholesky factors
+
+    def init_projections(self) -> None:
+        """
+        Initializes the detached projection to uniform mixing and 0 covariance.
+        Seeds the means with an O(1) spread to encourage specialization.
+        """
+        nn.init.zeros_(self.detached_project.weight)
         with torch.no_grad():
             logit_bias = torch.zeros(self.num_components)
-            decoder.detached_head.bias.copy_(
+            self.detached_project.bias.copy_(
                 torch.cat([logit_bias, self.cholesky.initial_bias(self.num_components)])
             )
 
             generator = torch.Generator().manual_seed(0)
             mean_bias = torch.randn(self.num_components, self.coefficients.num_coefs, generator=generator)
-            decoder.project.bias.copy_(mean_bias.flatten())  # seed to encourage specialization
-        return decoder
+            self.project.bias.copy_(mean_bias.flatten())  # seed to encourage specialization
 
     def split_predictions(
             self,
