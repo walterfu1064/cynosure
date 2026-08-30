@@ -19,9 +19,9 @@
       produces a known degeneracy across the focal plane.
    5. [`zstack_decoding/example_2e.ipynb`](zstack_decoding/example_2e.ipynb) - Estimation of the same single-image posterior by flow
       matching, allowing us to represent arbitrary posterior distributions, albeit not in closed form.
-   6. [`zstack_decoding/example_2f.ipynb`](zstack_decoding/example_2f.ipynb) - Cross-z attention pooled encoder to allow
-      z-stack geometry (number, placement, and ordering of planes) to vary dynamically. Comparison of the fitted attention
-      weights to the mutual information vs. z.
+   6. [`zstack_decoding/example_2f.ipynb`](zstack_decoding/example_2f.ipynb) - Set transformer encoder with cross-z
+      attention pooling to allow z-stack geometry (number, placement, and ordering of planes) to vary dynamically.
+      Comparison of the fitted attention weights to the mutual information vs. z.
 3. [`information_theory`](information_theory/) - **Sandbox for exploring information content in aberrated
    images**. Makes use of the aforementioned models. Will probably continue to evolve as ideas strike my fancy.
    1. [`information_theory/example_3a.ipynb`](information_theory/example_3a.ipynb) - Analysis of how the

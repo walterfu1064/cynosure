@@ -27,7 +27,7 @@ this project.
 | [`2c`](examples/zstack_decoding/example_2c.ipynb)    | Adds a Cholesky head, resolves covariances between coefficients                                            |
 | [`2d`](examples/zstack_decoding/example_2d.ipynb)    | Adds a mixture-density head, models multimodal posteriors from single-z images                             |
 | [`2e`](examples/zstack_decoding/example_2e.ipynb)    | Swaps in flow matching, samples posteriors of unrestricted form                                            |
-| [`2f`](examples/zstack_decoding/example_2f.ipynb)    | Cross-z attention pooling, allows dynamic z-stack size, placement, and ordering                            |
+| [`2f`](examples/zstack_decoding/example_2f.ipynb)    | Set transformer encoder, allows dynamic z-stack size, placement, and ordering                              |
 | **3. Information content**                           | *What the images themselves can say, network aside.*                                                       |
 | [`3a`](examples/information_theory/example_3a.ipynb) | Compares the MDN head's predicted uncertainty against the van Trees bound, calibrates the posterior by SBC |
 | [`3b`](examples/information_theory/example_3b.ipynb) | Drops the network entirely, tracks Fisher information through focus                                        |
