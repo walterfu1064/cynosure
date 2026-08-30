@@ -95,7 +95,7 @@ class UniformSpanGeometry(GeometryMode):
     def __post_init__(self):
         if not 2 <= self.min_planes <= self.max_planes:
             raise ValueError(
-                f"Require 2 <= min_planes <= max_planes, got {self.min_planes} and {self.max_planes}"
+                f"Require 1 <= min_planes <= max_planes, got {self.min_planes} and {self.max_planes}"
             )
         if not 0 < self.min_half_span <= self.max_half_span:
             raise ValueError(
@@ -121,7 +121,12 @@ class UniformSpanGeometry(GeometryMode):
             generator=generator,
             device=device,
         ).item()
-        ladder = torch.linspace(-1, 1, int(num_planes), dtype=dtype, device=device)  # [Z,]
+        if num_planes > 1:
+            ladder = torch.linspace(-1, 1, int(num_planes), dtype=dtype, device=device)  # [Z,]
+        else:
+            ladder = torch.sign(
+                torch.rand(batch_size, 1, dtype=dtype, device=device, generator=generator) - 0.5
+            )  # [B, 1]
         half_spans = self.min_half_span + (self.max_half_span - self.min_half_span) * torch.rand(
             batch_size, 1, generator=generator, dtype=dtype, device=device,
         )  # [B, 1]
