@@ -25,7 +25,6 @@ Validation batches are generated in the same way as training ones, but with a fi
 so they're consistent across epochs.
 """
 
-from collections.abc import Sequence
 from functools import partial
 from typing import Optional
 
@@ -36,11 +35,12 @@ from torch.utils.data import DataLoader, TensorDataset
 
 from .coefficients import CoefficientSpace
 from .flow_matching_head import FlowMatchingHead
+from .geometry_modes import GeometryMode
 from .jitter_modes import JitterMode, NoJitter
 from .noise_model import NoiseModel
 from .posterior_heads import (
-    CnnEncoderSpec,
     CovarianceHead,
+    EncoderSpec,
     HeadFactory,
     HeteroscedasticHead,
     MixtureHead,
@@ -106,14 +106,18 @@ class ZstackSolver(pl.LightningModule):
             phase_prior_cfg: PriorConfig,
             amp_prior_cfg: PriorConfig,
             object_distribution: ObjectDistribution,
-            z_objective: Optional[torch.Tensor] = None,
+            encoder_spec: EncoderSpec,
+            z_objective: Optional[torch.Tensor | GeometryMode] = None,
             z_jitter: float | JitterMode = NoJitter(),
             noise_cfg: Optional[NoiseConfig] = None,
-            hidden_channels: Sequence[int] = (16, 32),
-            embedding_dims: int = 128,
             twin_augmentation: bool = False,
             head_factory: HeadFactory,
     ):
+        """
+        `z_objective` sets the stack geometry as either a fixed stack or a stochastically
+        sampled geometry. The former can be passed as either a [Z,] tensor or a FixedGeometry.
+        Sampled geometries require a trunk that takes the geometry per call.
+        """
         super().__init__()
         self.save_hyperparameters(ignore=("object_distribution", "head_factory"))
 
@@ -157,13 +161,9 @@ class ZstackSolver(pl.LightningModule):
                 persistent=False,
             )
 
-        encoder_spec = CnnEncoderSpec(
-            in_channels=self.simulator.num_z,
-            spatial_hidden_channels=hidden_channels,
-            embedding_dims=embedding_dims,
-            spatial_size=sim_cfg.object_grid_size,
-        )
-        self.head: PosteriorHead = head_factory(self.simulator.coefficients, encoder_spec.build())
+        self.encoder_spec = encoder_spec
+        trunk = encoder_spec.build(spatial_size=sim_cfg.object_grid_size, num_z=self.simulator.num_z)
+        self.head: PosteriorHead = head_factory(self.simulator.coefficients, trunk)
 
     # Convenience accessors
 
@@ -188,7 +188,7 @@ class ZstackSolver(pl.LightningModule):
         return self.simulator.noise_model
 
     @property
-    def num_z(self) -> int:
+    def num_z(self) -> Optional[int]:
         return self.simulator.num_z
 
     @property
@@ -196,7 +196,11 @@ class ZstackSolver(pl.LightningModule):
         return self.simulator.z_jitter
 
     @property
-    def z_objective(self) -> torch.Tensor:
+    def geometry(self) -> GeometryMode:
+        return self.simulator.geometry
+
+    @property
+    def z_objective(self) -> Optional[torch.Tensor]:
         return self.simulator.z_objective
 
     @property
@@ -228,41 +232,60 @@ class ZstackSolver(pl.LightningModule):
 
     # Inference
 
-    def forward(self, images: torch.Tensor) -> torch.Tensor:
+    def forward(self, images: torch.Tensor, z: Optional[torch.Tensor] = None) -> torch.Tensor:
         """
-        Runs the head's network on a [B, num_z, H, W] batch of normalized z-stacks.
+        Runs the head's network on a [B, Z, H, W] batch of normalized z-stacks taken at
+        nominal objective positions `z` ([B, Z] or [Z,]). When `z` is omitted, the
+        simulator's fixed geometry is used; models with a sampled geometry then require it.
 
         The results represent different things, depending on the head type.
         ZstackSolver should call `predict_coefficients` or `predict_distribution`
         instead of trying to interpret the outputs of `forward` directly.
         """
-        return self.head(images)
+        if z is None:
+            z = self.simulator.z_objective  # stays None for sampled geometries; the trunk will complain
+        return self.head(images, z)
 
-    def predict_coefficients(self, images: torch.Tensor) -> tuple[torch.Tensor, ...]:
+    def predict_coefficients(
+            self,
+            images: torch.Tensor,
+            z: Optional[torch.Tensor] = None,
+    ) -> tuple[torch.Tensor, ...]:
         """
         Predicts the most likely physical aberration coefficients from normalized z-stacks.
         Supported by every subclass.
 
         Arguments:
         - images: [B, Z, H, W] batch of normalized z-stacks (singlet dimensions as needed)
+        - z: nominal objective positions, [B, Z] or [Z,] (defaults to the fixed geometry)
         Returns:
         - one [B, N_coefs] tensor per CoefficientBlock
         """
-        return self.coefficients.unwhiten_to_blocks(self.head.whitened_means(self.forward(images)))
+        return self.coefficients.unwhiten_to_blocks(self.head.whitened_means(self.forward(images, z)))
 
-    def predict_distribution(self, images: torch.Tensor) -> torch.distributions.Distribution:
+    def predict_distribution(
+            self,
+            images: torch.Tensor,
+            z: Optional[torch.Tensor] = None,
+    ) -> torch.distributions.Distribution:
         """
         Predicts the physical-space coefficient distribution over the non-pinned coefs.
         Only supported by certain subclasses.
 
         Arguments:
         - images: [B, Z, H, W] batch of normalized z-stacks
+        - z: nominal objective positions, [B, Z] or [Z,] (defaults to the fixed geometry)
         Returns:
         - a Distribution, type depends on head type (see class docstring)
         """
-        return self.head.distribution(self.forward(images))
+        return self.head.distribution(self.forward(images, z))
 
-    def predict_samples(self, images: torch.Tensor, num_samples: int) -> tuple[torch.Tensor, ...]:
+    def predict_samples(
+            self,
+            images: torch.Tensor,
+            num_samples: int,
+            z: Optional[torch.Tensor] = None,
+    ) -> tuple[torch.Tensor, ...]:
         """
         Draws physical-space posterior samples from normalized z-stacks.
         Only supported by certain subclasses.
@@ -270,10 +293,11 @@ class ZstackSolver(pl.LightningModule):
         Arguments:
         - images: [B, Z, H, W] batch of normalized z-stacks
         - num_samples: posterior samples to draw per z-stack
+        - z: nominal objective positions, [B, Z] or [Z,] (defaults to the fixed geometry)
         Returns:
         - one [B, num_samples, N_coefs] tensor per CoefficientBlock
         """
-        whitened = self.head.whitened_samples(self.forward(images), num_samples)
+        whitened = self.head.whitened_samples(self.forward(images, z), num_samples)
         return self.coefficients.unwhiten_to_blocks(self.coefficients.scatter_nonpinned(whitened))
 
     # PTL training methods
@@ -312,11 +336,11 @@ class ZstackSolver(pl.LightningModule):
         If `twin_augmentation` is enabled, training batches (but not validation ones)
         are doubled with the same images relabeled by their conjugate twins.
         """
-        images, phase_coefs, amp_coefs, *other_blocks = self.simulator.create_examples(
+        images, z, phase_coefs, amp_coefs, *other_blocks = self.simulator.create_examples(
             self.train_cfg.batch_size, generator=generator,
         )
         targets = self.coefficients.whiten_blocks(phase_coefs, amp_coefs, *other_blocks)
-        predictions = self.forward(images)
+        predictions = self.forward(images, z)
         if self.twin_augmentation and self.training:
             twin_targets = self.coefficients.whiten_blocks(
                 phase_coefs * self.twin_phase_signs, amp_coefs * self.twin_amp_signs, *other_blocks,

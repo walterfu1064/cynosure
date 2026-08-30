@@ -37,17 +37,17 @@ from ..config import MixtureConfig
 @dataclass(frozen=True, slots=True)
 class CnnEncoderSpec:
     """Architecture of a fixed-geometry CNN image trunk for a PosteriorHead"""
-    in_channels: int  # z-planes per stack
     spatial_hidden_channels: Sequence[int]
     embedding_dims: int
-    spatial_size: int  # object grid side length
 
-    def build(self) -> nn.Module:
+    def build(self, *, spatial_size: int, num_z: Optional[int]) -> nn.Module:
+        if num_z is None:
+            raise ValueError("CnnEncoderSpec requires a fixed stack geometry")
         return ZstackCnnEncoder(
-            in_channels=self.in_channels,
+            in_channels=num_z,
             spatial_hidden_channels=self.spatial_hidden_channels,
             embedding_dims=self.embedding_dims,
-            spatial_size=self.spatial_size,
+            spatial_size=spatial_size,
         )
 
 
@@ -60,9 +60,9 @@ class SetEncoderSpec:
     num_attention_layers: int
     num_attention_heads: int
     attention_feedforward_dim: int
-    spatial_size: int  # object grid side length
 
-    def build(self) -> nn.Module:
+    def build(self, *, spatial_size: int, num_z: Optional[int] = None) -> nn.Module:
+        """num_z is unused, set encoder trunk takes dynamic per-call geometry"""
         return SetEncoder(
             spatial_hidden_channels=self.spatial_hidden_channels,
             image_embedding_dims=self.image_embedding_dims,
@@ -70,10 +70,15 @@ class SetEncoderSpec:
             num_attention_layers=self.num_attention_layers,
             num_attention_heads=self.num_attention_heads,
             attention_feedforward_dim=self.attention_feedforward_dim,
-            spatial_size=self.spatial_size,
+            spatial_size=spatial_size,
         )
 
 
+"""
+Architecture of the image trunk a PosteriorHead reads its latent vectors from.
+Spec only holds free hyperparameters, while simulation-derived values (grid size, e.g.)
+are passed by the solver at `build` time.
+"""
 EncoderSpec = Union[
     CnnEncoderSpec,
     SetEncoderSpec,

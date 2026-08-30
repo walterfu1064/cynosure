@@ -98,13 +98,12 @@ def generate_and_predict(
     with torch.inference_mode():
         for start in range(0, batch_size, chunk_size):
             stop = min(start + chunk_size, batch_size)
-            example_data = solver.simulator.create_examples(
+            images, z, *label_blocks = solver.simulator.create_examples(
                 stop - start,
                 generator=generator,
             )
-            images = example_data[0]  # [chunk, Z, H, W]
-            coef_blocks_chunk = [cb.cpu() for cb in example_data[1:]]  # [[chunk, N], ...]
-            pred_coef_blocks_chunk = solver.predict_samples(images, num_samples)  # [[chunk, S, N], ...]
+            coef_blocks_chunk = [cb.cpu() for cb in label_blocks]  # [[chunk, N], ...]
+            pred_coef_blocks_chunk = solver.predict_samples(images, num_samples, z=z)  # [[chunk, S, N], ...]
             pred_coef_blocks_chunk = [pcb.cpu() for pcb in pred_coef_blocks_chunk]
             coef_blocks.append(coef_blocks_chunk)
             pred_coef_blocks.append(pred_coef_blocks_chunk)

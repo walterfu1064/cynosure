@@ -2,7 +2,10 @@
 Handles forwards simulation of aberrated z-stacks, and the synthesis of labeled training data.
 
 Owns the physical parts of a solver: BeamPropagator, ObjectDistribution, NoiseModel, and
-the z-positions of the image plane(s).
+the GeometryMode describing the z-positions the stacks are taken at.
+
+FixedGeometry simulators take the z-planes as a `z_objective` buffer, sampled geometries draw
+fresh nominal positions per batch.
 """
 
 from typing import Optional
@@ -11,6 +14,7 @@ import torch
 import torch.nn as nn
 
 from .coefficients import CoefficientSpace, build_coefficient_space
+from .geometry_modes import GeometryMode, as_geometry_mode
 from .jitter_modes import JitterMode, NoJitter, as_jitter_mode
 from .noise_model import NoiseModel
 from ..beam_propagation import BeamPropagator
@@ -28,7 +32,7 @@ class StackSimulator(nn.Module):
             object_distribution: ObjectDistribution,
             coefficients: CoefficientSpace,
             defocus_phase_coefs: torch.Tensor,
-            z_objective: Optional[torch.Tensor] = None,
+            z_objective: Optional[torch.Tensor | GeometryMode] = None,
             z_jitter: float | JitterMode = NoJitter(),
             noise_cfg: Optional[NoiseConfig] = None,
             chunk_size: Optional[int] = None,
@@ -43,7 +47,7 @@ class StackSimulator(nn.Module):
         - object_distribution: object being imaged, to be convolved with the PSF
         - coefficients: layout and priors for the aberration coefficients
         - defocus_phase_coefs: [num_phase,] projection of in-medium defocus, from `fit_defocus_to_phase_basis`
-        - z_objective: physical objective positions the stack is taken at (defaults to one-sided jitter)
+        - z_objective: physical objective positions or config the stack is taken at (defaults to one-sided jitter)
         - z_jitter: distribution of the rigid z-offset applied to each synthetic stack
         - noise_cfg: if given, NoiseModel args, used to apply noise before normalization
         - chunk_size: stacks per propagation chunk, to bound peak memory
@@ -52,17 +56,19 @@ class StackSimulator(nn.Module):
         self.propagator = propagator
         self.object_distribution = object_distribution
         self.coefficients = coefficients
-        self.noise_model = NoiseModel(noise_cfg) if noise_cfg else None
+        self.noise_model: NoiseModel = NoiseModel(noise_cfg) if noise_cfg else None
         self.noise_cfg = noise_cfg
         self.ftype = propagator.ftype
         self.chunk_size = chunk_size
-        self.z_jitter = as_jitter_mode(z_jitter)
+        self.z_jitter: JitterMode = as_jitter_mode(z_jitter)
 
         if z_objective is None:  # place the single plane so the jitter only ever reaches one side of focus
             z_objective = torch.full((1,), fill_value=self.z_jitter.max_offset, dtype=self.ftype)
-        self.register_buffer("z_objective", z_objective.to(self.ftype))
+        self.geometry: GeometryMode = as_geometry_mode(z_objective)
+        planes = self.geometry.fixed_planes  # None if stack geometry is sampled per batch
+        self.register_buffer("z_objective", None if planes is None else planes.to(self.ftype))
         self.register_buffer("defocus_phase_coefs", defocus_phase_coefs)
-        self.num_z: int = int(z_objective.shape[0])
+        self.num_z = self.geometry.num_z
 
     @classmethod
     def from_configs(
@@ -75,7 +81,7 @@ class StackSimulator(nn.Module):
             phase_prior_cfg: PriorConfig,
             amp_prior_cfg: PriorConfig,
             object_distribution: ObjectDistribution,
-            z_objective: Optional[torch.Tensor] = None,
+            z_objective: Optional[torch.Tensor | GeometryMode] = None,
             z_jitter: float | JitterMode = NoJitter(),
             noise_cfg: Optional[NoiseConfig] = None,
             chunk_size: Optional[int] = None,
@@ -99,8 +105,8 @@ class StackSimulator(nn.Module):
 
     @property
     def device(self) -> torch.device:
-        """Using `z_objective` as a proxy"""
-        return self.z_objective.device
+        """Using `defocus_phase_coefs` as a proxy"""
+        return self.defocus_phase_coefs.device
 
     def sample_coefficients(
             self,
@@ -133,9 +139,9 @@ class StackSimulator(nn.Module):
         Forwards-simulates a z-stack (or a batch of such) from the given defocus values and aberrations.
         Propagation happens in chunks to bound memory use.
 
-        The trailing dimension of `z` is taken to be the z-stack size, which must match `self.num_z`.
-        In general, `z` should be [B, Z] (with singlet dimensions as needed). A one-dimensional [B,]
-        is only accepted when `self.num_z` is 1.
+        The trailing dimension of `z` is taken to be the z-stack size.
+        This method is geometry-agnostic any [B, Z] is accepted, regardless of the GeometryMode.
+        A one-dimensional [B,] is read as a batch of single planes.
 
         This is all a consequence of BeamPropagator not differentiating between batches, z-stacks,
         and batches of z-stacks, instead folding all non-spatial dimensions into the batch dimension.
@@ -147,10 +153,11 @@ class StackSimulator(nn.Module):
         - objects: optional pre-drawn [B, 1, H, W] objects; freshly sampled per chunk when omitted
         - generator: for internal object draws, unused for non-stochastic objects
         """
-        if z.ndim == 1 and self.num_z == 1:
+        if z.ndim == 1:
             z = z.unsqueeze(-1)  # [B,] -> [B, 1]
-        if z.ndim != 2 or z.shape[-1] != self.num_z:
-            raise ValueError(f"`z` must be [B, num_z] with num_z = {self.num_z}, got {tuple(z.shape)}")
+        if z.ndim != 2:
+            raise ValueError(f"`z` must be [B, Z] or [B,], got {tuple(z.shape)}")
+        num_z = z.shape[-1]
         if not phase_coefs.shape[0] == amp_coefs.shape[0] == z.shape[0]:
             raise ValueError(
                 "Got different batch dims for `z`, `phase_coefs`, and `amp_coefs`: "
@@ -165,10 +172,10 @@ class StackSimulator(nn.Module):
         for start in range(0, batch_size, chunk_size):
             stop = min(start + chunk_size, batch_size)
             z_chunk = z[start:stop].reshape(-1)
-            phase_chunk = phase_coefs[start:stop].repeat_interleave(self.num_z, dim=0)
-            amp_chunk = amp_coefs[start:stop].repeat_interleave(self.num_z, dim=0)
+            phase_chunk = phase_coefs[start:stop].repeat_interleave(num_z, dim=0)
+            amp_chunk = amp_coefs[start:stop].repeat_interleave(num_z, dim=0)
             psf = self.propagator(z_chunk, phase_chunk, amp_chunk)
-            psf = psf.reshape(stop - start, self.num_z, *psf.shape[-2:])  # unfold to [B, Z, H, W]
+            psf = psf.reshape(stop - start, num_z, *psf.shape[-2:])  # unfold to [B, Z, H, W]
             if objects is None:
                 img = self.object_distribution(psf, batch_size=stop - start, generator=generator)
             else:
@@ -184,6 +191,14 @@ class StackSimulator(nn.Module):
         """Samples [B,] rigid objective-z offsets from the jitter mode"""
         return self.z_jitter.sample(batch_size, device=self.device, dtype=self.ftype, generator=generator)
 
+    def sample_geometry(
+            self,
+            batch_size: int,
+            generator: Optional[torch.Generator] = None,
+    ) -> torch.Tensor:
+        """Samples [B, Z] nominal objective z-positions from the geometry mode (Z drawn per call)"""
+        return self.geometry.sample(batch_size, device=self.device, dtype=self.ftype, generator=generator)
+
     def z_offset_to_coefficients(self, z_offsets: torch.Tensor) -> torch.Tensor:
         """
         Returns the [..., num_phase] aberrations equivalent to the [...,] z-offsets (in objective-z units).
@@ -198,12 +213,24 @@ class StackSimulator(nn.Module):
             self,
             batch_size: int,
             offsets: Optional[torch.Tensor] = None,
+            z_objective: Optional[torch.Tensor] = None,
     ) -> torch.Tensor:
         """
-        Returns the [B, num_z] in-medium defocus corresponding to the stored z positions.
+        Returns the [B, Z] in-medium defocus corresponding to the given z positions,
+        defaulting to the stored fixed geometry.
         Rigidly shifts each z-stack by `offsets` (in objective-z units) if given.
+
+        Arguments:
+        - offsets: optional [B,] rigid shifts, e.g. from `sample_z_jitter`
+        - z_objective: [Z,] or [B, Z] nominal objective positions (required for non-fixed geometries)
         """
-        z = self.z_objective.unsqueeze(0).expand(batch_size, self.num_z)
+        if z_objective is None:
+            z_objective = self.z_objective
+            if z_objective is None:
+                raise ValueError("Geometry isn't fixed, so `z_objective` must be passed explicitly")
+        if z_objective.ndim == 1:
+            z_objective = z_objective.unsqueeze(0)
+        z = z_objective.expand(batch_size, z_objective.shape[-1])
         if offsets is not None:
             z = z + offsets.unsqueeze(1)
         return self.propagator.defocus_from_objective_z(z)
@@ -233,18 +260,22 @@ class StackSimulator(nn.Module):
             objects: Optional[torch.Tensor] = None,
             generator: Optional[torch.Generator] = None,
             chunk_size: Optional[int] = None,
+            z_objective: Optional[torch.Tensor] = None,
     ) -> torch.Tensor:
         """
-        Forwards-simulates the normalized z-stacks at the model's own z positions
+        Forwards-simulates the normalized z-stacks at the given z positions
         from physical [B, N] coefficients (e.g. as returned by `predict_coefficients`).
+        If None, defaults to the model's own fixed geometry.
         If `with_noise`, adds noise before normalizing.
         If `offsets` is given, rigidly shifts each z-stack, preserving the relative z-spacing.
         If `objects` is given, images those [B, 1, H, W] objects instead of fresh draws.
+        If `z_objective` is given ([Z,] or [B, Z]), images at those nominal positions instead
+        of the stored ones (required when the stored geometry isn't fixed).
 
-        Returns [B, num_z, H, W].
+        Returns [B, Z, H, W].
         """
         with torch.no_grad():
-            z = self.batched_defocus(phase_coefs.shape[0], offsets=offsets)
+            z = self.batched_defocus(phase_coefs.shape[0], offsets=offsets, z_objective=z_objective)
             images = self.simulate_stacks(
                 z,
                 phase_coefs,
@@ -264,20 +295,24 @@ class StackSimulator(nn.Module):
             chunk_size: Optional[int] = None,
     ) -> tuple[torch.Tensor, ...]:
         """
-        Samples a set of aberrations (and an object per stack, for stochastic object
-        distributions), forwards-simulates the z-stacks, corrupts them with the noise
-        model, and normalizes them for use as inputs to the CNN.
+        Samples a set of aberrations, a stack geometry (if stochastic), and an object
+        per stack (if stochastic), forwards-simulates the z-stacks, corrupts them
+        with the noise model, and normalizes them for use as inputs to the network.
 
         If `z_jitter` is set, calculates the synthetic z-stacks under random rigid offsets,
-        and adds the defocus-equivalent phase shifts to the synthetic labels.
+        and adds the defocus-equivalent phase shifts to the synthetic labels. The returned
+        `z` stays nominal so the network doesn't get to see the jitter directly.
 
-        Returns `images` followed by one label tensor per block of the coefficient space:
-        - images: [B, num_z, H, W] normalized z-stacks
+        Returns the network inputs (`images` and their nominal z-positions), followed by
+        one label tensor per block of the coefficient space:
+        - images: [B, Z, H, W] normalized z-stacks
+        - z: [B, Z] nominal objective z-positions the stacks were taken at
         - phase_coefs: [B, num_phase_coefs] effective phase aberration coefficients (including jitter offsets)
         - amp_coefs: [B, num_amp_coefs] amp aberration coefficients
         - object_params: [B, num_params] object labels if reported by the object distribution
         """
         phase_coefs, amp_coefs = self.sample_coefficients(batch_size, generator=generator)
+        z = self.sample_geometry(batch_size, generator=generator)
         offsets = self.sample_z_jitter(batch_size, generator=generator)
         objects, object_params = self.object_distribution.sample_with_params(batch_size, generator)
         images = self.simulate_normalized_stacks(
@@ -288,8 +323,9 @@ class StackSimulator(nn.Module):
             objects=objects,
             generator=generator,
             chunk_size=chunk_size,
+            z_objective=z,
         )
         phase_coefs = phase_coefs + self.z_offset_to_coefficients(offsets)
         if self.object_distribution.num_params:
-            return images, phase_coefs, amp_coefs, object_params
-        return images, phase_coefs, amp_coefs
+            return images, z, phase_coefs, amp_coefs, object_params
+        return images, z, phase_coefs, amp_coefs
