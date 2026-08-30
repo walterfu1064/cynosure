@@ -18,6 +18,7 @@ from cynosure.config import (
 from cynosure.config_defaults import get_default_mixture_config, get_default_training_config
 from cynosure.object_distribution import FixedBead, SampledKBlobs
 from cynosure.zstack_decoding.jitter_modes import ShellJitter, SoftShellJitter, UniformJitter
+from cynosure.zstack_decoding.posterior_heads import CnnEncoderSpec
 from cynosure.zstack_decoding.zstack_solver import (
     ZstackSolver_MLE,
     ZstackSolver_MixedDensity,
@@ -67,6 +68,10 @@ def make_solver(
         object_distrib = FixedBead(sim_cfg, 0.1)
     else:
         object_distrib = object_distrib_factory(sim_cfg)
+    encoder_spec = CnnEncoderSpec(
+        spatial_hidden_channels=(16, 32),
+        embedding_dims=128,
+    )
 
     return solver_cls(
         train_cfg=train_cfg if train_cfg is not None else make_train_cfg(),
@@ -79,6 +84,7 @@ def make_solver(
         object_distribution=object_distrib,
         z_objective=z_objective,
         z_jitter=z_jitter,
+        encoder_spec=encoder_spec,
         **kwargs,
     )
 
@@ -125,7 +131,7 @@ def test_reconstruction_through_z_offset():
     """Aberrated labels at a z-offset can be reconstructed, substituting z-offset for aberrations"""
     solver = make_solver(z_jitter=2.0, phase_allowed=((2, 0), (4, 0), (6, 0)))
     generator = torch.Generator().manual_seed(0)
-    images, phase_coefs, amp_coefs = solver.simulator.create_examples(8, generator=generator)
+    images, _, phase_coefs, amp_coefs = solver.simulator.create_examples(8, generator=generator)
 
     recon = solver.simulator.simulate_normalized_stacks(phase_coefs, amp_coefs, offsets=None)
     assert _rel_l1(recon, images) < 5e-3
@@ -134,10 +140,10 @@ def test_reconstruction_through_z_offset():
 def _mixing_logit_grads(solver: ZstackSolver_MixedDensity) -> torch.Tensor:
     """Runs one loss backward and returns the gradient reaching the mixing logits"""
     generator = torch.Generator().manual_seed(0)
-    images, phase_coefs, amp_coefs = solver.simulator.create_examples(4, generator=generator)
+    images, z, phase_coefs, amp_coefs = solver.simulator.create_examples(4, generator=generator)
     targets = solver.coefficients.whiten_blocks(phase_coefs, amp_coefs)
 
-    predictions = solver.forward(images).detach().requires_grad_(True)
+    predictions = solver.forward(images, z).detach().requires_grad_(True)
     loss, _ = solver.compute_losses(predictions, targets)
     loss.backward()
 
@@ -174,9 +180,9 @@ def test_coefficient_blocks():
     assert coefs.block_sizes == (3, 3, solver.object_distribution.num_params) == (3, 3, 7)
 
     outputs = solver.simulator.create_examples(512, generator=torch.Generator().manual_seed(0))
-    assert len(outputs) == 3 + 1  # images plus one label tensor per block
+    assert len(outputs) == 3 + 2  # images and nominal z, plus one label tensor per block
 
-    targets = coefs.whiten_blocks(*outputs[1:])
+    targets = coefs.whiten_blocks(*outputs[2:])
     assert targets.shape == (512, coefs.num_coefs)
     for name in ("phase", "amp", "object"):  # every block whitens to ~N(0, 1), excluding pinned coefs
         whitened = coefs.block_coefs(targets, name)
@@ -197,7 +203,7 @@ def test_jitter_widened_whitening(jitter):
     axial_scale = solver.simulator.propagator.axial_scale
     assert coefs.jitter_variance == pytest.approx(jitter.variance * axial_scale ** 2)
 
-    _, phase_coefs, amp_coefs = solver.simulator.create_examples(1024, generator=torch.Generator().manual_seed(0))
+    _, _, phase_coefs, amp_coefs = solver.simulator.create_examples(1024, generator=torch.Generator().manual_seed(0))
     whitened = coefs.block_coefs(coefs.whiten_blocks(phase_coefs, amp_coefs), "phase")
     assert whitened.mean(dim=0).abs().max() < 0.15
     assert (whitened.std(dim=0) - 1).abs().max() < 0.1
@@ -213,7 +219,7 @@ def test_object_labels_describe_imaged_object():
     """Synthesized coef + object labels correctly reproduce the synthesized images"""
     solver = make_blob_solver(num_blobs=2)
     generator = torch.Generator().manual_seed(0)
-    images, phase_coefs, amp_coefs, object_params = solver.simulator.create_examples(8, generator=generator)
+    images, _, phase_coefs, amp_coefs, object_params = solver.simulator.create_examples(8, generator=generator)
 
     objects = solver.object_distribution.render_from_params(object_params)
     recon = solver.simulator.simulate_normalized_stacks(phase_coefs, amp_coefs, objects=objects)
