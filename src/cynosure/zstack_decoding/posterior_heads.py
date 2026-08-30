@@ -85,6 +85,16 @@ EncoderSpec = Union[
 ]
 
 
+def get_default_cnn_encoder_spec(
+    spatial_hidden_channels: Sequence[int] = (16, 32),
+    embedding_dims: int = 128,
+) -> CnnEncoderSpec:
+    return CnnEncoderSpec(
+        spatial_hidden_channels=spatial_hidden_channels,
+        embedding_dims=embedding_dims,
+    )
+
+
 class CholeskyParameterization(nn.Module):
     """
     Turns a decoder's flattened lower-triangular outputs into a Cholesky factor.
