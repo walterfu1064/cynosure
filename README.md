@@ -17,24 +17,25 @@ and the object being imaged. The examples are self-contained, but generally buil
 the development of the repository. Reading through them in order is likely the best way to understand
 this project.
 
-| Example                                              | Summary                                                                                                    |
-|:-----------------------------------------------------|:-----------------------------------------------------------------------------------------------------------|
-| **1. Classical phase retrieval**                     | *Fitting the forward model directly to measured images.*                                                   |
-| [`1`](examples/zstack_fitting/example_1.ipynb)       | Fits Zernike phase and amplitude coefficients by gradient descent on a real bead z-stack                   |
-| **2. Amortized decoding**                            | *A CNN trained on synthetic images, modeling the posterior ever more thoroughly.*                          |
-| [`2a`](examples/zstack_decoding/example_2a.ipynb)    | Trains a CNN on simulated z-stacks, estimates the most likely coefficients                                 |
-| [`2b`](examples/zstack_decoding/example_2b.ipynb)    | Adds a heteroscedastic head, gives each coefficient its own error bar                                      |
-| [`2c`](examples/zstack_decoding/example_2c.ipynb)    | Adds a Cholesky head, resolves covariances between coefficients                                            |
-| [`2d`](examples/zstack_decoding/example_2d.ipynb)    | Adds a mixture-density head, models multimodal posteriors from single-z images                             |
-| [`2e`](examples/zstack_decoding/example_2e.ipynb)    | Swaps in flow matching, samples posteriors of unrestricted form                                            |
-| [`2f`](examples/zstack_decoding/example_2f.ipynb)    | Set transformer encoder, allows dynamic z-stack size, placement, and ordering                              |
-| **3. Information content**                           | *What the images themselves can say, network aside.*                                                       |
-| [`3a`](examples/information_theory/example_3a.ipynb) | Compares the MDN head's predicted uncertainty against the van Trees bound, calibrates the posterior by SBC |
-| [`3b`](examples/information_theory/example_3b.ipynb) | Drops the network entirely, tracks Fisher information through focus                                        |
-| [`3c`](examples/information_theory/example_3c.ipynb) | SBC analysis similar to `example_3a`, but using the flow-matched head                                      |
-| **4. Unknown objects**                               | *Dropping the assumption that the emitter is known.*                                                       |
-| [`4a`](examples/object_decoding/example_4a.ipynb)    | Randomizes bead diameter during training, maps uncertainty and bound against object size                   |
-| [`4b`](examples/object_decoding/example_4b.ipynb)    | Extends flow matching to an extended two-blob object, infers the object and aberrations jointly            |
+| Example                                              | Summary                                                                                                                |
+|:-----------------------------------------------------|:-----------------------------------------------------------------------------------------------------------------------|
+| **1. Classical phase retrieval**                     | *Fitting the forward model directly to measured images*                                                                |
+| [`1`](examples/zstack_fitting/example_1.ipynb)       | Fits Zernike phase and amplitude coefficients by gradient descent on a real bead z-stack                               |
+| **2. Amortized decoding**                            | *A CNN trained on synthetic images, modeling the posterior ever more thoroughly*                                       |
+| [`2a`](examples/zstack_decoding/example_2a.ipynb)    | Trains a CNN on simulated z-stacks, estimates the most likely coefficients                                             |
+| [`2b`](examples/zstack_decoding/example_2b.ipynb)    | Adds a heteroscedastic head, gives each coefficient its own error bar                                                  |
+| [`2c`](examples/zstack_decoding/example_2c.ipynb)    | Adds a Cholesky head, resolves covariances between coefficients                                                        |
+| [`2d`](examples/zstack_decoding/example_2d.ipynb)    | Adds a mixture-density head, models multimodal posteriors from single-z images                                         |
+| [`2e`](examples/zstack_decoding/example_2e.ipynb)    | Swaps in flow matching, samples posteriors of unrestricted form                                                        |
+| [`2f`](examples/zstack_decoding/example_2f.ipynb)    | Set transformer encoder, allows dynamic z-stack size, placement, and ordering                                          |
+| [`2g`](examples/zstack_decoding/example_2g.ipynb)    | Set transformer encoder + flow-matching model, handling single-z or dynamic stack geometries with arbitrary posteriors |
+| **3. Information content**                           | *What the images themselves can say, network aside*                                                                    |
+| [`3a`](examples/information_theory/example_3a.ipynb) | Compares the MDN head's predicted uncertainty against the van Trees bound, calibrates the posterior by SBC             |
+| [`3b`](examples/information_theory/example_3b.ipynb) | Drops the network entirely, tracks Fisher information through focus                                                    |
+| [`3c`](examples/information_theory/example_3c.ipynb) | SBC analysis similar to `example_3a`, but using the flow-matched head                                                  |
+| **4. Unknown objects**                               | *Dropping the assumption that the emitter is known*                                                                    |
+| [`4a`](examples/object_decoding/example_4a.ipynb)    | Randomizes bead diameter during training, maps uncertainty and bound against object size                               |
+| [`4b`](examples/object_decoding/example_4b.ipynb)    | Extends flow matching to an extended two-blob object, infers the object and aberrations jointly                        |
 
 
 ### Installation

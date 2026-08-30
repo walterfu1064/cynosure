@@ -1,0 +1,145 @@
+amp_cfg: !!python/object/new:cynosure.config.ZernikeConfig
+  state:
+  - 4
+  - !!python/tuple
+    - !!python/tuple
+      - 0
+      - 0
+    - &id001 !!python/tuple
+      - 2
+      - 0
+    - &id002 !!python/tuple
+      - 4
+      - 0
+  - 3
+amp_prior_cfg: !!python/object/new:cynosure.config.PriorConfig
+  state:
+  - 0.05
+  - 2
+encoder_spec: !!python/object/new:cynosure.zstack_decoding.posterior_heads.SetEncoderSpec
+  state:
+  - !!python/tuple
+    - 32
+    - 64
+  - 128
+  - 128
+  - 2
+  - 2
+  - 256
+  - 0.25
+  - 4.0
+noise_cfg: !!python/object/new:cynosure.config.NoiseConfig
+  state:
+  - 100000
+  - 1000000
+  - 1000
+  - 10
+num_val_samples: 64
+ode_solver: null
+optics_cfg: !!python/object/new:cynosure.config.OpticalConfig
+  state:
+  - 0.51
+  - 4500.0
+  - 0.9
+  - fitted
+  - 1.54
+  - 1.0
+phase_cfg: !!python/object/new:cynosure.config.ZernikeConfig
+  state:
+  - 6
+  - !!python/tuple
+    - !!python/tuple
+      - 1
+      - 1
+    - !!python/tuple
+      - 1
+      - -1
+    - !!python/tuple
+      - 2
+      - -2
+    - *id001
+    - !!python/tuple
+      - 2
+      - 2
+    - !!python/tuple
+      - 3
+      - -3
+    - !!python/tuple
+      - 3
+      - -1
+    - !!python/tuple
+      - 3
+      - 1
+    - !!python/tuple
+      - 3
+      - 3
+    - !!python/tuple
+      - 4
+      - -4
+    - !!python/tuple
+      - 4
+      - -2
+    - *id002
+    - !!python/tuple
+      - 4
+      - 2
+    - !!python/tuple
+      - 4
+      - 4
+    - !!python/tuple
+      - 5
+      - -5
+    - !!python/tuple
+      - 5
+      - -3
+    - !!python/tuple
+      - 5
+      - -1
+    - !!python/tuple
+      - 5
+      - 1
+    - !!python/tuple
+      - 5
+      - 3
+    - !!python/tuple
+      - 5
+      - 5
+  - 20
+phase_prior_cfg: !!python/object/new:cynosure.config.PriorConfig
+  state:
+  - 0.05
+  - 1
+sim_cfg: !!python/object/new:cynosure.config.SimulationConfig
+  state:
+  - 255
+  - 31
+  - 0.15
+  - torch.float32
+  - torch.complex64
+train_cfg: !!python/object/new:cynosure.config.TrainingConfig
+  state:
+  - 0.0001
+  - 0.001
+  - 32
+  - 4
+  - 200
+  - 32
+  - 42
+twin_augmentation: false
+vel_cfg: !!python/object/new:cynosure.config.VelocityConfig
+  state:
+  - 64
+  - !!python/tuple
+    - 256
+    - 256
+    - 256
+  - true
+  - 256
+  - 50
+z_jitter: 1.0
+z_objective: !!python/object/new:cynosure.zstack_decoding.geometry_modes.UniformSpanGeometry
+  state:
+  - 1
+  - 7
+  - 0.5
+  - 2.0

@@ -22,6 +22,9 @@
    6. [`zstack_decoding/example_2f.ipynb`](zstack_decoding/example_2f.ipynb) - Set transformer encoder with cross-z
       attention pooling to allow z-stack geometry (number, placement, and ordering of planes) to vary dynamically.
       Comparison of the fitted attention weights to the mutual information vs. z.
+   7. [`zstack_decoding/example_2g.ipynb`](zstack_decoding/example_2g.ipynb) - Combination of `example_2e` and `example_2f`.
+      Flow-matching model with cross-z attention pooling, allowing arbitrary posteriors and geometry (both z-stacks and
+      single-z).
 3. [`information_theory`](information_theory/) - **Sandbox for exploring information content in aberrated
    images**. Makes use of the aforementioned models. Will probably continue to evolve as ideas strike my fancy.
    1. [`information_theory/example_3a.ipynb`](information_theory/example_3a.ipynb) - Analysis of how the
