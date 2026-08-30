@@ -412,6 +412,7 @@ class ZstackSolver_MixedDensity(ZstackSolver):
     def predict_component_coefficients(
             self,
             images: torch.Tensor,
+            z: Optional[torch.Tensor] = None,
     ) -> tuple[torch.Tensor, ...]:
         """
         Predicts the physical-space coefficients of each mixture component.
@@ -420,7 +421,7 @@ class ZstackSolver_MixedDensity(ZstackSolver):
         - weights: [B, K] mixture weights
         - one [B, K, N_b] coefficient tensor per CoefficientBlock
         """
-        means, logits, _ = self.head.split_predictions(self.forward(images))
+        means, logits, _ = self.head.split_predictions(self.forward(images, z))
         return logits.softmax(dim=1), *self.coefficients.unwhiten_to_blocks(means)
 
 

@@ -213,7 +213,7 @@ class StackSimulator(nn.Module):
             self,
             batch_size: int,
             offsets: Optional[torch.Tensor] = None,
-            z_objective: Optional[torch.Tensor] = None,
+            z: Optional[torch.Tensor] = None,
     ) -> torch.Tensor:
         """
         Returns the [B, Z] in-medium defocus corresponding to the given z positions,
@@ -222,15 +222,15 @@ class StackSimulator(nn.Module):
 
         Arguments:
         - offsets: optional [B,] rigid shifts, e.g. from `sample_z_jitter`
-        - z_objective: [Z,] or [B, Z] nominal objective positions (required for non-fixed geometries)
+        - z: [Z,] or [B, Z] nominal objective positions (required for non-fixed geometries)
         """
-        if z_objective is None:
-            z_objective = self.z_objective
-            if z_objective is None:
-                raise ValueError("Geometry isn't fixed, so `z_objective` must be passed explicitly")
-        if z_objective.ndim == 1:
-            z_objective = z_objective.unsqueeze(0)
-        z = z_objective.expand(batch_size, z_objective.shape[-1])
+        if z is None:
+            z = self.z_objective
+            if z is None:
+                raise ValueError("Geometry isn't fixed, so `z` must be passed explicitly")
+        if z.ndim == 1:
+            z = z.unsqueeze(0)
+        z = z.expand(batch_size, z.shape[-1])
         if offsets is not None:
             z = z + offsets.unsqueeze(1)
         return self.propagator.defocus_from_objective_z(z)
@@ -255,12 +255,12 @@ class StackSimulator(nn.Module):
             self,
             phase_coefs: torch.Tensor,
             amp_coefs: torch.Tensor,
+            z: Optional[torch.Tensor] = None,
             with_noise: bool = False,
             offsets: Optional[torch.Tensor] = None,
             objects: Optional[torch.Tensor] = None,
             generator: Optional[torch.Generator] = None,
             chunk_size: Optional[int] = None,
-            z_objective: Optional[torch.Tensor] = None,
     ) -> torch.Tensor:
         """
         Forwards-simulates the normalized z-stacks at the given z positions
@@ -269,13 +269,13 @@ class StackSimulator(nn.Module):
         If `with_noise`, adds noise before normalizing.
         If `offsets` is given, rigidly shifts each z-stack, preserving the relative z-spacing.
         If `objects` is given, images those [B, 1, H, W] objects instead of fresh draws.
-        If `z_objective` is given ([Z,] or [B, Z]), images at those nominal positions instead
+        If `z` is given ([Z,] or [B, Z]), images at those nominal positions instead
         of the stored ones (required when the stored geometry isn't fixed).
 
         Returns [B, Z, H, W].
         """
         with torch.no_grad():
-            z = self.batched_defocus(phase_coefs.shape[0], offsets=offsets, z_objective=z_objective)
+            z = self.batched_defocus(phase_coefs.shape[0], offsets=offsets, z=z)
             images = self.simulate_stacks(
                 z,
                 phase_coefs,
@@ -323,7 +323,7 @@ class StackSimulator(nn.Module):
             objects=objects,
             generator=generator,
             chunk_size=chunk_size,
-            z_objective=z,
+            z=z,
         )
         phase_coefs = phase_coefs + self.z_offset_to_coefficients(offsets)
         if self.object_distribution.num_params:

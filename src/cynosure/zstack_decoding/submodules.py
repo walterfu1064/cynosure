@@ -99,8 +99,10 @@ class SetEncoder(nn.Module):
             z_embedding_dims: int,
             num_attention_layers: int,
             num_attention_heads: int,
-            attention_feedforward_dim: int,
+            attention_feedforward_dims: int,
             spatial_size: int,
+            z_min_frequency: float,
+            z_max_frequency: float,
     ):
         super().__init__()
 
@@ -115,14 +117,14 @@ class SetEncoder(nn.Module):
             spatial_size=spatial_size,
         )
 
-        self.z_encoder = FourierEmbed(z_embedding_dims)
+        self.z_encoder = FourierEmbed(z_embedding_dims, z_min_frequency, z_max_frequency)
 
         self.transformers = nn.Sequential(*[
             nn.TransformerEncoderLayer(
                 d_model=self.embedding_dims,
                 nhead=num_attention_heads,
                 batch_first=True,
-                dim_feedforward=attention_feedforward_dim,
+                dim_feedforward=attention_feedforward_dims,
             )
             for _ in range(num_attention_layers)
         ])
@@ -153,6 +155,10 @@ class SetEncoder(nn.Module):
         B, Z, H, W = x.shape
         if z.ndim == 1:  # interpret as [Z,] shared across batch
             z = z.unsqueeze(0).expand(B, Z)
+
+        # normalize inputs framewise to mean 0, stdev 1
+        x = x - x.mean((-2, -1), keepdim=True)
+        x = x / (x.std((-2, -1), keepdim=True) + 1e-8)
 
         frame_emb = self.framewise_cnn(x.reshape(B*Z, 1, H, W)).reshape(B, Z, -1)  # [B, Z, H, W] -> [B, Z, Ef]
         z_emb = self.z_encoder(z)  # [B, Z] -> [B, Z, Ez]

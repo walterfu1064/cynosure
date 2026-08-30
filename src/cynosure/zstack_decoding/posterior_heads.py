@@ -59,7 +59,9 @@ class SetEncoderSpec:
     z_embedding_dims: int
     num_attention_layers: int
     num_attention_heads: int
-    attention_feedforward_dim: int
+    attention_feedforward_dims: int
+    z_min_frequency: float
+    z_max_frequency: float
 
     def build(self, *, spatial_size: int, num_z: Optional[int] = None) -> nn.Module:
         """num_z is unused, set encoder trunk takes dynamic per-call geometry"""
@@ -69,8 +71,10 @@ class SetEncoderSpec:
             z_embedding_dims=self.z_embedding_dims,
             num_attention_layers=self.num_attention_layers,
             num_attention_heads=self.num_attention_heads,
-            attention_feedforward_dim=self.attention_feedforward_dim,
+            attention_feedforward_dims=self.attention_feedforward_dims,
             spatial_size=spatial_size,
+            z_min_frequency=self.z_min_frequency,
+            z_max_frequency=self.z_max_frequency,
         )
 
 
@@ -84,6 +88,9 @@ EncoderSpec = Union[
     SetEncoderSpec,
 ]
 
+# These dataclasses are frozen and hold numbers, mark them save to serialize so `torch.load` doesn't complain
+torch.serialization.add_safe_globals([CnnEncoderSpec, SetEncoderSpec])
+
 
 def get_default_cnn_encoder_spec(
     spatial_hidden_channels: Sequence[int] = (16, 32),
@@ -92,6 +99,28 @@ def get_default_cnn_encoder_spec(
     return CnnEncoderSpec(
         spatial_hidden_channels=spatial_hidden_channels,
         embedding_dims=embedding_dims,
+    )
+
+
+def get_default_set_encoder_spec(
+        spatial_hidden_channels: Sequence[int] = (16, 32),
+        image_embedding_dims: int = 128,
+        z_embedding_dims: int = 128,
+        num_attention_layers: int = 4,
+        num_attention_heads: int = 8,
+        attention_feedforward_dims: int = 512,
+        z_min_frequency: float = 0.25,
+        z_max_frequency: float = 4.0,
+) -> SetEncoderSpec:
+    return SetEncoderSpec(
+        spatial_hidden_channels=spatial_hidden_channels,
+        image_embedding_dims=image_embedding_dims,
+        z_embedding_dims=z_embedding_dims,
+        num_attention_layers=num_attention_layers,
+        num_attention_heads=num_attention_heads,
+        attention_feedforward_dims=attention_feedforward_dims,
+        z_min_frequency=z_min_frequency,
+        z_max_frequency=z_max_frequency,
     )
 
 

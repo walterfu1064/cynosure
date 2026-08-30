@@ -299,7 +299,9 @@ def make_set_encoder_spec() -> SetEncoderSpec:
         z_embedding_dims=8,
         num_attention_layers=1,
         num_attention_heads=4,
-        attention_feedforward_dim=64,
+        attention_feedforward_dims=64,
+        z_min_frequency=0.25,
+        z_max_frequency=4.0,
     )
 
 
@@ -343,7 +345,7 @@ def test_sampled_geometry_reconstructs_image():
         8, generator=torch.Generator().manual_seed(0),
     )
 
-    recon = solver.simulator.simulate_normalized_stacks(phase_coefs, amp_coefs, z_objective=z)
+    recon = solver.simulator.simulate_normalized_stacks(phase_coefs, amp_coefs, z)
     assert _rel_l1(recon, images) < 5e-3
 
 
