@@ -93,7 +93,7 @@ class UniformSpanGeometry(GeometryMode):
     max_half_span: float
 
     def __post_init__(self):
-        if not 2 <= self.min_planes <= self.max_planes:
+        if not 1 <= self.min_planes <= self.max_planes:
             raise ValueError(
                 f"Require 1 <= min_planes <= max_planes, got {self.min_planes} and {self.max_planes}"
             )
