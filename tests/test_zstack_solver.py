@@ -17,8 +17,9 @@ from cynosure.config import (
 )
 from cynosure.config_defaults import get_default_mixture_config, get_default_training_config
 from cynosure.object_distribution import FixedBead, SampledKBlobs
+from cynosure.zstack_decoding.geometry_modes import UniformSpanGeometry
 from cynosure.zstack_decoding.jitter_modes import ShellJitter, SoftShellJitter, UniformJitter
-from cynosure.zstack_decoding.posterior_heads import CnnEncoderSpec
+from cynosure.zstack_decoding.posterior_heads import CnnEncoderSpec, SetEncoderSpec
 from cynosure.zstack_decoding.zstack_solver import (
     ZstackSolver_MLE,
     ZstackSolver_MixedDensity,
@@ -39,6 +40,7 @@ def make_solver(
         solver_cls=ZstackSolver_MLE,
         train_cfg=None,
         object_distrib_factory=None,
+        encoder_spec=None,
         **kwargs,
 ):
     """
@@ -68,10 +70,11 @@ def make_solver(
         object_distrib = FixedBead(sim_cfg, 0.1)
     else:
         object_distrib = object_distrib_factory(sim_cfg)
-    encoder_spec = CnnEncoderSpec(
-        spatial_hidden_channels=(16, 32),
-        embedding_dims=128,
-    )
+    if encoder_spec is None:
+        encoder_spec = CnnEncoderSpec(
+            spatial_hidden_channels=(16, 32),
+            embedding_dims=128,
+        )
 
     return solver_cls(
         train_cfg=train_cfg if train_cfg is not None else make_train_cfg(),
@@ -286,3 +289,65 @@ def test_twin_augmentation_doubles_training_batches():
     solver = solver.eval()
     _, predictions, targets, _ = solver._forwards_common(generator=torch.Generator().manual_seed(0))
     assert predictions.shape[0] == targets.shape[0] == 4
+
+
+def make_set_encoder_spec() -> SetEncoderSpec:
+    """A small dynamic-geometry trunk spec for testing"""
+    return SetEncoderSpec(
+        spatial_hidden_channels=(4, 8),
+        image_embedding_dims=24,
+        z_embedding_dims=8,
+        num_attention_layers=1,
+        num_attention_heads=4,
+        attention_feedforward_dim=64,
+    )
+
+
+def test_fixed_geometry_examples_return_nominal_z():
+    """With a fixed geometry, `create_examples` reports the stored planes for every stack"""
+    z_objective = torch.linspace(-1, 1, 3)
+    solver = make_solver(z_objective=z_objective, z_jitter=1.0)
+    _, z, *_ = solver.simulator.create_examples(4, generator=torch.Generator().manual_seed(0))
+    torch.testing.assert_close(z, z_objective.unsqueeze(0).expand(4, 3))
+
+
+def test_sampled_geometry_varies():
+    """Sampled stack geometries vary per batch/stack"""
+    solver = make_solver(
+        z_objective=UniformSpanGeometry(min_planes=3, max_planes=7, min_half_span=0.5, max_half_span=1.5),
+        z_jitter=1.0,
+        phase_allowed=((2, 0), (4, 0), (6, 0)),  # enough to capture jittered defocus
+        encoder_spec=make_set_encoder_spec(),
+        train_cfg=make_train_cfg(batch_size=4),
+    )
+    assert solver.num_z is None and solver.z_objective is None
+
+    images, z, phase_coefs, amp_coefs = solver.simulator.create_examples(
+        8, generator=torch.Generator().manual_seed(0),
+    )
+    assert images.shape[:2] == z.shape and 3 <= z.shape[1] <= 7
+    assert z[:, -1].unique().numel() > 1  # per-stack half-spans differ within the batch
+
+
+def test_sampled_geometry_reconstructs_image():
+    """Sampled geometries correctly produce labels that can reconstruct the image"""
+    solver = make_solver(
+        z_objective=UniformSpanGeometry(min_planes=3, max_planes=7, min_half_span=0.5, max_half_span=1.5),
+        z_jitter=1.0,
+        phase_allowed=((2, 0), (4, 0), (6, 0)),  # enough to capture jittered defocus
+        encoder_spec=make_set_encoder_spec(),
+        train_cfg=make_train_cfg(batch_size=4),
+    )
+
+    images, z, phase_coefs, amp_coefs = solver.simulator.create_examples(
+        8, generator=torch.Generator().manual_seed(0),
+    )
+
+    recon = solver.simulator.simulate_normalized_stacks(phase_coefs, amp_coefs, z_objective=z)
+    assert _rel_l1(recon, images) < 5e-3
+
+
+def test_sampled_geometry_rejects_cnn_encoder():
+    """Sampled geometry is incompatible with a CNN trunk, and raises"""
+    with pytest.raises(ValueError, match="fixed stack geometry"):
+        make_solver(z_objective=UniformSpanGeometry(3, 5, 0.5, 1.0))
