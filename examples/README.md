@@ -21,7 +21,8 @@
       matching, allowing us to represent arbitrary posterior distributions, albeit not in closed form.
    6. [`zstack_decoding/example_2f.ipynb`](zstack_decoding/example_2f.ipynb) - Set transformer encoder with cross-z
       attention pooling to allow z-stack geometry (number, placement, and ordering of planes) to vary dynamically.
-      Comparison of the fitted attention weights to the mutual information vs. z.
+      Comparison of the fitted attention weights to the mutual information vs. z, and confirmation that omitting a
+      z-plane causes the predictions to deteriorate commensurate with the attention weight.
    7. [`zstack_decoding/example_2g.ipynb`](zstack_decoding/example_2g.ipynb) - Combination of `example_2e` and `example_2f`.
       Flow-matching model with cross-z attention pooling, allowing arbitrary posteriors and geometry (both z-stacks and
       single-z).
